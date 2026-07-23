@@ -1,0 +1,104 @@
+# CSI Controller Plugin — gRPC server + csi-provisioner + csi-attacher
+# sidecars, plus the failover controller that keeps share-managers alive.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hcloud-csi-rwx-csi-controller
+  namespace: hcloud-csi-rwx
+  labels:
+    app: hcloud-csi-rwx-csi-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hcloud-csi-rwx-csi-controller
+  template:
+    metadata:
+      labels:
+        app: hcloud-csi-rwx-csi-controller
+    spec:
+      serviceAccountName: hcloud-csi-rwx-controller
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: csi-driver
+          image: hcloud-csi-rwx
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/hcloud-csi-rwx-csi"]
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: CSI_ENDPOINT
+              value: "unix:///csi/csi.sock"
+            # Share-manager tuning — forwarded into the share-manager pods.
+            # SHARE_MANAGER_IMAGE defaults to the released ghcr.io image
+            # matching this build; override for local development.
+            - name: NFS_ALLOWED_CLIENTS
+              value: "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
+            - name: LEASE_LIFETIME
+              value: "60"
+            - name: GRACE_PERIOD
+              value: "90"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: failover-controller
+          image: hcloud-csi-rwx
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/hcloud-csi-rwx-controller"]
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: NFS_ALLOWED_CLIENTS
+              value: "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16"
+            - name: LEASE_LIFETIME
+              value: "60"
+            - name: GRACE_PERIOD
+              value: "90"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v6.2.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=true
+            - --leader-election=false
+            - --timeout=5m
+            # passes PVC name/namespace to CreateVolume so the failover
+            # controller can evict workload pods of the right claim
+            - --extra-create-metadata
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.11.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --leader-election=false
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+      volumes:
+        - name: socket-dir
+          emptyDir: {}

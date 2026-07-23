@@ -1,0 +1,47 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Test overlay — uses a local image (for development)
+# Build it first (needs podman or docker):
+#   podman build -t localhost/hcloud-csi-rwx:latest -f Containerfile .
+# and pre-load it onto every node, then deploy with:
+#   kubectl apply -k k8s/overlays/test
+
+resources:
+  - ../../base
+  - example-pvc.yaml
+
+images:
+  - name: ghcr.io/mrhein/hcloud-csi-rwx
+    newName: localhost/hcloud-csi-rwx
+    newTag: latest
+
+# The CSI driver and failover controller spawn share-manager pods from
+# SHARE_MANAGER_IMAGE (default: the released ghcr.io image) — point them at
+# the local image too.
+patches:
+  - target:
+      kind: Deployment
+      name: hcloud-csi-rwx-csi-controller
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: hcloud-csi-rwx-csi-controller
+        namespace: hcloud-csi-rwx
+      spec:
+        template:
+          spec:
+            containers:
+              - name: csi-driver
+                env:
+                  - name: SHARE_MANAGER_IMAGE
+                    value: localhost/hcloud-csi-rwx:latest
+                  - name: SHARE_MANAGER_PULL_POLICY
+                    value: Never
+              - name: failover-controller
+                env:
+                  - name: SHARE_MANAGER_IMAGE
+                    value: localhost/hcloud-csi-rwx:latest
+                  - name: SHARE_MANAGER_PULL_POLICY
+                    value: Never

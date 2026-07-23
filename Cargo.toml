@@ -1,0 +1,53 @@
+[package]
+name = "hcloud-csi-rwx"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+authors = ["Mathias Rhein <mathias@rhein.io>"]
+description = "RWX (ReadWriteMany) volume support for Hetzner Cloud CSI via NFS-Ganesha"
+repository = "https://github.com/mrhein/hcloud-csi-rwx"
+# ganesha-patch/ contains LGPL-3.0 code and is not part of this crate.
+exclude = ["ganesha-patch", "k8s", ".github"]
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive", "env"] }
+nix = { version = "0.30", features = ["fs", "user"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.8"
+anyhow = "1"
+kube = { version = "1.0", features = ["client", "runtime"] }
+k8s-openapi = { version = "0.25", features = ["latest"] }
+futures = "0.3"
+tonic = "0.13"
+tokio-stream = "0.1"
+prost = "0.13"
+prost-types = "0.13"
+# plain-HTTP client for share-manager endpoint discovery (no TLS features)
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[build-dependencies]
+tonic-build = "0.13"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[[bin]]
+name = "hcloud-csi-rwx"
+path = "src/main.rs"
+
+[[bin]]
+name = "hcloud-csi-rwx-controller"
+path = "src/bin/controller.rs"
+
+[[bin]]
+name = "hcloud-csi-rwx-recovery-backend"
+path = "src/bin/recovery_backend.rs"
+
+[[bin]]
+name = "hcloud-csi-rwx-csi"
+path = "src/bin/csi.rs"

@@ -1,0 +1,116 @@
+hcloud-csi-rwx
+Copyright 2026 Mathias Rhein
+
+This product includes software developed as part of hcloud-csi-rwx,
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes or bundles the following third-party software:
+
+========================================================================
+NFS-Ganesha
+========================================================================
+  Source:   https://github.com/nfs-ganesha/nfs-ganesha (upstream, tag V12.0)
+  License:  LGPL-3.0-or-later (see LICENSES/LGPL-3.0-or-later.txt and
+            LICENSES/GPL-3.0.txt)
+  Copyright: NFS-Ganesha contributors, Bull S.A., Red Hat, IBM, and others.
+  Use:      Built from upstream V12.0 source. Our patch
+            (ganesha-patch/hcloud-ganesha.patch) wires an additional
+            recovery backend into 7 files; the patched ganesha.nfsd is
+            shipped in the container image. Corresponding source =
+            upstream tag V12.0 + the patch + recovery_hcloud.c in this
+            repository (see ganesha-patch/build-ganesha.sh for exact,
+            commit-pinned build steps).
+
+========================================================================
+Longhorn recovery backend (recovery_longhorn.c)
+========================================================================
+  Source:   https://github.com/rancher/nfs-ganesha
+            (src/SAL/recovery/recovery_longhorn.c)
+  License:  LGPL-3.0-or-later
+  Copyright: The Longhorn/Rancher contributors.
+  Use:      ganesha-patch/recovery_hcloud.c is a modified version of
+            recovery_longhorn.c (renamed longhorn -> hcloud, ported to the
+            nfs-ganesha V12.0 API, hardened HTTP handling, optional
+            bearer-token auth). See the header of recovery_hcloud.c for
+            the list of modifications. The rancher/nfs-ganesha fork itself
+            is NOT used — we build upstream V12.0.
+
+========================================================================
+ntirpc (NFS-Ganesha RPC library)
+========================================================================
+  Source:   https://github.com/nfs-ganesha/ntirpc (tag v10.0)
+  License:  BSD-3-Clause
+  Copyright: ntirpc contributors.
+  Use:      Built from source as a dependency of nfs-ganesha.
+
+========================================================================
+libkmip (ceph fork)
+========================================================================
+  Source:   https://github.com/ceph/libkmip
+  License:  Apache-2.0 OR BSD (dual-licensed, see upstream LICENSE)
+  Copyright: The libkmip authors.
+  Use:      Built from source as a dependency of nfs-ganesha V12.0
+            (commit-pinned in ganesha-patch/build-ganesha.sh).
+
+========================================================================
+Container Storage Interface specification
+========================================================================
+  Source:   https://github.com/container-storage-interface/spec
+  File:     proto/csi.proto
+  License:  Apache-2.0
+  Copyright: The Kubernetes Authors.
+  Use:      Protobuf definitions for the CSI gRPC driver.
+
+========================================================================
+Longhorn share-manager (design reference)
+========================================================================
+  Source:   https://github.com/longhorn/longhorn-share-manager
+  License:  Apache-2.0
+  Copyright: The Longhorn Authors.
+  Use:      Architecture and ganesha configuration patterns are derived
+            from Longhorn's share-manager implementation. No source code
+            is included — the share-manager here is original Rust.
+
+========================================================================
+Longhorn recovery backend HTTP API (design reference)
+========================================================================
+  Source:   https://github.com/longhorn/longhorn-manager/tree/master/recovery_backend
+  License:  Apache-2.0
+  Copyright: The Longhorn Authors.
+  Use:      HTTP API design for the NFSv4 recovery backend server is
+            derived from Longhorn's implementation. Implemented in Rust.
+
+========================================================================
+Rust dependencies (direct)
+========================================================================
+  tokio               MIT
+  clap                MIT OR Apache-2.0
+  nix                 MIT
+  serde               MIT OR Apache-2.0
+  serde_json          MIT OR Apache-2.0
+  tracing             MIT
+  tracing-subscriber  MIT
+  axum                MIT
+  anyhow              MIT OR Apache-2.0
+  kube                Apache-2.0
+  k8s-openapi         Apache-2.0
+  futures             MIT OR Apache-2.0
+  tonic               MIT
+  tokio-stream        MIT
+  prost               Apache-2.0
+  prost-types         Apache-2.0
+  reqwest             MIT OR Apache-2.0
+  tonic-build         MIT
+
+  Transitive dependencies carry further permissive licenses (e.g.
+  BSD-3-Clause, ISC, Unicode-3.0, and the ring license). Run
+  `cargo license` or `cargo about generate` against Cargo.lock for the
+  complete, exact list of the statically linked crates.
+
+========================================================================
+SUSE BCI base container image
+========================================================================
+  Source:   registry.suse.com/bci/bci-base:15.7
+  License:  SLE BCI EULA, see https://www.suse.com/licensing/eula/
+            (redistributable base container image)
+  Use:      Runtime base image for the container.

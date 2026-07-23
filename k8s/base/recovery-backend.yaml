@@ -1,0 +1,91 @@
+# Recovery Backend — HTTP API for ganesha's hcloud NFSv4 recovery backend.
+# Stores client state in ConfigMaps for lock preservation across failover.
+#
+# Optional authentication: create a Secret named
+# `hcloud-csi-rwx-recovery-token` (key: `token`) in this namespace. When
+# present, the API requires `Authorization: Bearer <token>` and the
+# share-manager pods automatically send it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hcloud-csi-rwx-recovery-backend
+  namespace: hcloud-csi-rwx
+  labels:
+    app: hcloud-csi-rwx-recovery-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hcloud-csi-rwx-recovery-backend
+  template:
+    metadata:
+      labels:
+        app: hcloud-csi-rwx-recovery-backend
+    spec:
+      serviceAccountName: hcloud-csi-rwx-recovery
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: recovery-backend
+          image: hcloud-csi-rwx
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/hcloud-csi-rwx-recovery-backend"]
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: RECOVERY_BACKEND_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RECOVERY_BACKEND_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hcloud-csi-rwx-recovery-token
+                  key: token
+                  optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 9503
+              name: recov-backend
+          readinessProbe:
+            httpGet:
+              path: /v1/healthz
+              port: 9503
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/healthz
+              port: 9503
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hcloud-csi-rwx-recovery-backend
+  namespace: hcloud-csi-rwx
+  labels:
+    app: hcloud-csi-rwx-recovery-backend
+spec:
+  type: ClusterIP
+  selector:
+    app: hcloud-csi-rwx-recovery-backend
+  ports:
+    - name: recov-backend
+      port: 9503
+      targetPort: 9503

@@ -1,0 +1,117 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 534b873..5461388 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1453,6 +1453,11 @@ if (NOT LIBURCU_INC)
+   message(FATAL_ERROR "userspace-rcu includes not found!")
+ endif(NOT LIBURCU_INC)
+ check_symbol_exists(urcu_ref_get_unless_zero urcu/ref.h HAVE_URCU_REF_GET_UNLESS_ZERO)
++find_path(LIBCURL_INC curl/curl.h)
++find_library(LIBCURL_LIB curl)
++
++find_path(LIBJSONC_INC json/json.h)
++find_library(LIBJSONC_LIB json-c json)
+ 
+ # All the plumbing in the basement
+ set(SYSTEM_LIBRARIES
+@@ -1462,6 +1467,8 @@ set(SYSTEM_LIBRARIES
+   ${KRB5_LIBRARIES}
+   ${CMAKE_THREAD_LIBS_INIT}
+   ${LIBURCU_LIB}
++  ${LIBCURL_LIB}
++  ${LIBJSONC_LIB}
+ )
+ 
+ include_directories(${LIBURCU_INC})
+diff --git a/src/SAL/CMakeLists.txt b/src/SAL/CMakeLists.txt
+index b24a66e..4220349 100644
+--- a/src/SAL/CMakeLists.txt
++++ b/src/SAL/CMakeLists.txt
+@@ -38,6 +38,7 @@ SET(sal_STAT_SRCS
+    nfs4_owner.c
+    recovery/recovery_fs.c
+    recovery/recovery_fs_ng.c
++   recovery/recovery_hcloud.c
+ )
+ 
+ if(USE_NLM)
+diff --git a/src/SAL/nfs4_recovery.c b/src/SAL/nfs4_recovery.c
+index ee22c9c..3243b36 100644
+--- a/src/SAL/nfs4_recovery.c
++++ b/src/SAL/nfs4_recovery.c
+@@ -1322,6 +1322,8 @@ const char *recovery_backend_str(enum recovery_backend recovery_backend)
+ 		return "rados_ng";
+ 	case RECOVERY_BACKEND_RADOS_CLUSTER:
+ 		return "rados_cluster";
++	case RECOVERY_BACKEND_HCLOUD:
++		return "hcloud";
+ 	case RECOVERY_BACKEND_NONE:
+ 		return "none";
+ 	}
+@@ -1348,6 +1350,9 @@ int nfs4_recovery_init(void)
+ 	case RECOVERY_BACKEND_FS_NG:
+ 		fs_ng_backend_init(&recovery_backend);
+ 		break;
++	case RECOVERY_BACKEND_HCLOUD:
++		hcloud_backend_init(&recovery_backend);
++		break;
+ 	case RECOVERY_BACKEND_NONE:
+ 		fs_no_recovery_backend_init(&recovery_backend);
+ 		break;
+@@ -1650,6 +1657,7 @@ int load_recovery_param_from_conf(config_file_t parse_tree,
+ 	switch (nfs_param.nfsv4_param.recovery_backend) {
+ 	case RECOVERY_BACKEND_FS:
+ 	case RECOVERY_BACKEND_FS_NG:
++	case RECOVERY_BACKEND_HCLOUD:
+ 	case RECOVERY_BACKEND_NONE:
+ 		return 0;
+ 
+diff --git a/src/include/gsh_recovery.h b/src/include/gsh_recovery.h
+index 64b9e35..a14a050 100644
+--- a/src/include/gsh_recovery.h
++++ b/src/include/gsh_recovery.h
+@@ -31,6 +31,7 @@ enum recovery_backend {
+ 	RECOVERY_BACKEND_RADOS_KV,
+ 	RECOVERY_BACKEND_RADOS_NG,
+ 	RECOVERY_BACKEND_RADOS_CLUSTER,
++	RECOVERY_BACKEND_HCLOUD,
+ 	RECOVERY_BACKEND_NONE,
+ };
+ 
+diff --git a/src/include/sal_functions.h b/src/include/sal_functions.h
+index 3999d4c..91b020e 100644
+--- a/src/include/sal_functions.h
++++ b/src/include/sal_functions.h
+@@ -1144,6 +1144,7 @@ struct nfs4_recovery_backend {
+ 
+ void fs_backend_init(struct nfs4_recovery_backend **);
+ void fs_ng_backend_init(struct nfs4_recovery_backend **);
++void hcloud_backend_init(struct nfs4_recovery_backend **);
+ int load_recovery_param_from_conf(config_file_t, struct config_error_type *);
+ 
+ #ifdef __cplusplus
+diff --git a/src/nfs-ganesha.spec-in.cmake b/src/nfs-ganesha.spec-in.cmake
+index 204061c..2261e89 100644
+--- a/src/nfs-ganesha.spec-in.cmake
++++ b/src/nfs-ganesha.spec-in.cmake
+@@ -168,6 +168,8 @@ BuildRequires:	systemd-rpm-macros
+ BuildRequires:	libcap-devel
+ BuildRequires:	libblkid-devel
+ BuildRequires:	libuuid-devel
++BuildRequires:	libcurl-devel
++BuildRequires:	libjson-c-devel
+ %if %{with mspac_support}
+ BuildRequires:	libwbclient-devel
+ %endif
+diff --git a/src/support/nfs_read_conf.c b/src/support/nfs_read_conf.c
+index 9c12abd..28a6924 100644
+--- a/src/support/nfs_read_conf.c
++++ b/src/support/nfs_read_conf.c
+@@ -727,6 +727,7 @@ static struct config_item_list recovery_backend_types[] = {
+ 	CONFIG_LIST_TOK("rados_kv", RECOVERY_BACKEND_RADOS_KV),
+ 	CONFIG_LIST_TOK("rados_ng", RECOVERY_BACKEND_RADOS_NG),
+ 	CONFIG_LIST_TOK("rados_cluster", RECOVERY_BACKEND_RADOS_CLUSTER),
++	CONFIG_LIST_TOK("hcloud",		RECOVERY_BACKEND_HCLOUD),
+ 	CONFIG_LIST_TOK("none", RECOVERY_BACKEND_NONE),
+ 	CONFIG_LIST_EOL
+ };

@@ -1,0 +1,150 @@
+# Least-privilege RBAC, one ServiceAccount per component:
+#   - controller: CSI controller plugin + sidecars + failover controller
+#   - node:       CSI node plugin (only resolves share-manager services)
+#   - recovery:   recovery backend (only its state ConfigMaps)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hcloud-csi-rwx-controller
+  namespace: hcloud-csi-rwx
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hcloud-csi-rwx-node
+  namespace: hcloud-csi-rwx
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hcloud-csi-rwx-recovery
+  namespace: hcloud-csi-rwx
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hcloud-csi-rwx-controller
+rules:
+  # csi-provisioner + backing PVC management
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  # share-manager pods (own namespace) + workload eviction on failover
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # csi-attacher + failover force-detach
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments"]
+    verbs: ["get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["volumeattachments/status"]
+    verbs: ["patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["csinodes"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hcloud-csi-rwx-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hcloud-csi-rwx-controller
+subjects:
+  - kind: ServiceAccount
+    name: hcloud-csi-rwx-controller
+    namespace: hcloud-csi-rwx
+---
+# Namespace-scoped extras for the controller: per-volume services and
+# state/recovery ConfigMaps live only in our own namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hcloud-csi-rwx-controller
+  namespace: hcloud-csi-rwx
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hcloud-csi-rwx-controller
+  namespace: hcloud-csi-rwx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hcloud-csi-rwx-controller
+subjects:
+  - kind: ServiceAccount
+    name: hcloud-csi-rwx-controller
+    namespace: hcloud-csi-rwx
+---
+# Node plugin: only needs to resolve the per-volume service for NFS endpoint
+# discovery at mount time.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hcloud-csi-rwx-node
+  namespace: hcloud-csi-rwx
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hcloud-csi-rwx-node
+  namespace: hcloud-csi-rwx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hcloud-csi-rwx-node
+subjects:
+  - kind: ServiceAccount
+    name: hcloud-csi-rwx-node
+    namespace: hcloud-csi-rwx
+---
+# Recovery backend: only its own state ConfigMaps.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hcloud-csi-rwx-recovery
+  namespace: hcloud-csi-rwx
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hcloud-csi-rwx-recovery
+  namespace: hcloud-csi-rwx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: hcloud-csi-rwx-recovery
+subjects:
+  - kind: ServiceAccount
+    name: hcloud-csi-rwx-recovery
+    namespace: hcloud-csi-rwx
