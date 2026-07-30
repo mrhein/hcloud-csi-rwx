@@ -350,13 +350,8 @@ impl node_server::Node for CsiDriver {
         let endpoint = match resolve_current_endpoint(&self.kube, &vol_id).await {
             Ok(ep) => ep,
             Err(e) => {
-                warn!(volume = %vol_id, error = %e, "endpoint resolution failed, using volume_context");
-                req.volume_context
-                    .get("nfsEndpoint")
-                    .cloned()
-                    .ok_or_else(|| {
-                        Status::invalid_argument("no nfsEndpoint in volume_context")
-                    })?
+                warn!(volume = %vol_id, error = %e, "endpoint resolution failed");
+                return Err(Status::unavailable("share-manager not ready, retry"));
             }
         };
         info!(volume = %vol_id, target = %target, endpoint = %endpoint, "CSI NodePublishVolume");

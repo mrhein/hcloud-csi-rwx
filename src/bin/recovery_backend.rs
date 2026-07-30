@@ -40,9 +40,10 @@ fn namespace() -> String {
         .unwrap_or_else(|| "hcloud-csi-rwx".into())
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct RecoveryBackendInput {
-    hostname: String,
+    #[serde(default)]
+    hostname: Option<String>,
     version: String,
 }
 
@@ -66,6 +67,17 @@ fn bad_request(e: impl std::fmt::Display) -> ApiError {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
 
+/// Parse the request body, tolerating trailing NUL bytes — ganesha recovery
+/// backends built from the original Longhorn C code send `strlen(payload)+1`
+/// as the body length, i.e. include the string terminator.
+fn parse_input(body: &Bytes) -> Result<RecoveryBackendInput, ApiError> {
+    let mut data: &[u8] = body.as_ref();
+    while let Some(rest) = data.strip_suffix(&[0]) {
+        data = rest;
+    }
+    serde_json::from_slice(data).map_err(bad_request)
+}
+
 /// Map kube errors to the closest HTTP status so ganesha sees real failures
 /// (it treats anything != 200 as an error).
 fn kube_error(e: kube::Error) -> ApiError {
@@ -79,9 +91,11 @@ fn kube_error(e: kube::Error) -> ApiError {
 }
 
 async fn create(State(ctx): State<Arc<Ctx>>, body: Bytes) -> ApiResult<StatusCode> {
-    let input: RecoveryBackendInput = serde_json::from_slice(&body).map_err(bad_request)?;
+    let input = parse_input(&body)?;
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &namespace());
-    let name = cm_name(&input.hostname);
+    let hostname = input.hostname.as_ref()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "hostname required in body".into()))?;
+    let name = cm_name(hostname);
     let cm = ConfigMap {
         metadata: kube::api::ObjectMeta {
             name: Some(name.clone()),
@@ -93,7 +107,7 @@ async fn create(State(ctx): State<Arc<Ctx>>, body: Bytes) -> ApiResult<StatusCod
         ..Default::default()
     };
     match cm_api.create(&Default::default(), &cm).await {
-        Ok(_) => info!(hostname = %input.hostname, "created recovery configmap"),
+        Ok(_) => info!(hostname = %hostname, "created recovery configmap"),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             // Already exists — update version
             let patch = serde_json::json!({
@@ -104,7 +118,7 @@ async fn create(State(ctx): State<Arc<Ctx>>, body: Bytes) -> ApiResult<StatusCod
                 .patch(&name, &PatchParams::apply("recovery-backend"), &Patch::Merge(&patch))
                 .await
                 .map_err(kube_error)?;
-            info!(hostname = %input.hostname, "updated existing recovery configmap");
+            info!(hostname = %hostname, "updated existing recovery configmap");
         }
         Err(e) => return Err(kube_error(e)),
     }
@@ -116,7 +130,7 @@ async fn end_grace(
     Path(hostname): Path<String>,
     body: Bytes,
 ) -> ApiResult<StatusCode> {
-    let input: RecoveryBackendInput = serde_json::from_slice(&body).map_err(bad_request)?;
+    let input = parse_input(&body)?;
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &namespace());
     let name = cm_name(&hostname);
     let cm = cm_api.get(&name).await.map_err(kube_error)?;
@@ -151,7 +165,7 @@ async fn add_client_id(
     Path((hostname, client_id)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<StatusCode> {
-    let input: RecoveryBackendInput = serde_json::from_slice(&body).map_err(bad_request)?;
+    let input = parse_input(&body)?;
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &namespace());
     let name = cm_name(&hostname);
     let cm = cm_api.get(&name).await.map_err(kube_error)?;
@@ -252,7 +266,7 @@ async fn add_revoke_fh(
     Path((hostname, client_id, revoke_fh)): Path<(String, String, String)>,
     body: Bytes,
 ) -> ApiResult<StatusCode> {
-    let input: RecoveryBackendInput = serde_json::from_slice(&body).map_err(bad_request)?;
+    let input = parse_input(&body)?;
     let cm_api: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &namespace());
     let name = cm_name(&hostname);
     let cm = cm_api.get(&name).await.map_err(kube_error)?;
@@ -366,6 +380,21 @@ mod tests {
         Router::new()
             .route("/v1/recoverybackend/{hostname}", get(|| async { "ok" }))
             .layer(middleware::from_fn_with_state(Arc::new(token), require_bearer))
+    }
+
+    #[test]
+    fn parse_input_tolerates_trailing_nul() {
+        // ganesha's C recovery backend historically sent strlen(payload)+1
+        let body = Bytes::from_static(b"{\"hostname\": \"h1\", \"version\": \"V1\"}\0");
+        let input = parse_input(&body).unwrap();
+        assert_eq!(input.hostname.as_deref(), Some("h1"));
+        assert_eq!(input.version, "V1");
+
+        let clean = Bytes::from_static(b"{\"hostname\": \"h1\", \"version\": \"V1\"}");
+        assert!(parse_input(&clean).is_ok());
+
+        let garbage = Bytes::from_static(b"not json\0");
+        assert_eq!(parse_input(&garbage).unwrap_err().0, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

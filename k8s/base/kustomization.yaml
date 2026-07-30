@@ -13,7 +13,7 @@ resources:
 images:
   - name: hcloud-csi-rwx
     newName: ghcr.io/mrhein/hcloud-csi-rwx
-    newTag: v0.1.0
+    newTag: v0.1.1
 
 # Common labels applied to all resources
 labels:
