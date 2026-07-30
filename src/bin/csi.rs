@@ -337,6 +337,22 @@ async fn resolve_current_endpoint(kube: &KubeClient, volume_id: &str) -> anyhow:
         .ok_or_else(|| anyhow::anyhow!("share-manager reported no endpoint"))
 }
 
+/// Run a mount/umount command with a hard timeout. NFS operations against a
+/// dead server can block for minutes — a synchronous call here would pin a
+/// tokio worker and eventually wedge the whole gRPC server.
+async fn run_command(program: &str, args: &[&str], timeout_secs: u64) -> Result<(), Status> {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).kill_on_drop(true);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), cmd.status())
+        .await
+        .map_err(|_| Status::deadline_exceeded(format!("{program} timed out after {timeout_secs}s")))?
+        .map_err(st)?;
+    if !status.success() {
+        return Err(Status::internal(format!("{program} failed: {status}")));
+    }
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl node_server::Node for CsiDriver {
     async fn node_publish_volume(
@@ -347,13 +363,16 @@ impl node_server::Node for CsiDriver {
         let vol_id = req.volume_id.clone();
         let target = req.target_path.clone();
 
-        let endpoint = match resolve_current_endpoint(&self.kube, &vol_id).await {
-            Ok(ep) => ep,
-            Err(e) => {
-                warn!(volume = %vol_id, error = %e, "endpoint resolution failed");
-                return Err(Status::unavailable("share-manager not ready, retry"));
-            }
-        };
+        // No fallback to volume_context here: during a failover the endpoint
+        // captured at provisioning time points at the dead node, and a hard
+        // NFS mount against it blocks for minutes. Failing fast lets kubelet
+        // retry until the new share-manager reports its endpoint.
+        let endpoint = resolve_current_endpoint(&self.kube, &vol_id)
+            .await
+            .map_err(|e| {
+                warn!(volume = %vol_id, error = %e, "endpoint resolution failed (failover in progress?)");
+                Status::unavailable(format!("NFS endpoint not resolvable: {e}"))
+            })?;
         info!(volume = %vol_id, target = %target, endpoint = %endpoint, "CSI NodePublishVolume");
 
         std::fs::create_dir_all(&target).map_err(st)?;
@@ -364,15 +383,19 @@ impl node_server::Node for CsiDriver {
                 "malformed NFS endpoint {endpoint:?}"
             )));
         }
-        let status = std::process::Command::new("mount")
-            .arg("-t").arg("nfs4")
-            .arg("-o").arg("vers=4,hard,timeo=30,retrans=3")
-            .arg(format!("{server}:{path}"))
-            .arg(&target)
-            .status().map_err(st)?;
-        if !status.success() {
-            return Err(Status::internal(format!("mount failed: {status}")));
-        }
+        run_command(
+            "mount",
+            &[
+                "-t",
+                "nfs4",
+                "-o",
+                "vers=4,hard,timeo=30,retrans=3",
+                &format!("{server}:{path}"),
+                &target,
+            ],
+            30,
+        )
+        .await?;
         Ok(Response::new(NodePublishVolumeResponse {}))
     }
 
@@ -382,11 +405,10 @@ impl node_server::Node for CsiDriver {
     ) -> Result<Response<NodeUnpublishVolumeResponse>, Status> {
         let target = req.into_inner().target_path;
         info!(target = %target, "CSI NodeUnpublishVolume");
-        let status = std::process::Command::new("umount").arg(&target).status();
-        if !matches!(status, Ok(s) if s.success()) {
+        if run_command("umount", &[&target], 20).await.is_err() {
             // Stale NFS mounts (dead server) block a regular umount forever.
             warn!(target = %target, "umount failed, retrying lazily");
-            let _ = std::process::Command::new("umount").arg("-l").arg(&target).status();
+            let _ = run_command("umount", &["-l", &target], 10).await;
         }
         Ok(Response::new(NodeUnpublishVolumeResponse {}))
     }

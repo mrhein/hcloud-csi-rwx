@@ -119,14 +119,14 @@ The container image is built automatically via GitHub Actions for
 `linux/amd64` and `linux/arm64`:
 
 ```bash
-# Pinned to the v0.1.0 release (image ghcr.io/mrhein/hcloud-csi-rwx:v0.1.0)
-kubectl apply -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.1.0"
+# Pinned to the v0.1.2 release (image ghcr.io/mrhein/hcloud-csi-rwx:v0.1.2)
+kubectl apply -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.1.2"
 ```
 
 ### Option B: Install from a local checkout
 
 ```bash
-git clone --branch v0.1.0 https://github.com/mrhein/hcloud-csi-rwx.git
+git clone --branch v0.1.2 https://github.com/mrhein/hcloud-csi-rwx.git
 cd hcloud-csi-rwx
 kubectl apply -k k8s/base
 ```
@@ -208,7 +208,7 @@ spec:
 ```bash
 kubectl delete -k k8s/base
 # Or from remote:
-kubectl delete -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.1.0"
+kubectl delete -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.1.2"
 ```
 
 ## Security
@@ -324,57 +324,42 @@ ganesha is built from upstream `nfs-ganesha/nfs-ganesha` V12.0 (not the rancher 
 
 ## Benchmark Results
 
-fio benchmarks on a 3-node arm64 cluster (Hetzner Cloud, openSUSE MicroOS, k3s v1.36).
-Running on ganesha V12.0 built from upstream with our own `hcloud` recovery backend.
+fio benchmarks on a 3-node arm64 cluster (Hetzner Cloud, openSUSE MicroOS,
+k3s v1.36), v0.1.0 image (NFS-Ganesha V12.0 built from upstream).
+Measured 2026-07-24.
 
 ### Test Setup
 
 - **RWO baseline**: direct hcloud block volume (ext4, no NFS)
-- **RWX 1 pod**: single NFS client
-- **RWX 2 pods**: two concurrent NFS clients on different nodes
-- **RWX 3 pods**: three concurrent NFS clients on different nodes
-- All tests: 10s runtime, 256M working set, `--time_based`
+- **RWX N pods**: N concurrent NFS clients on different nodes (aggregate
+  throughput), mounted directly against the share-manager node IP — one of
+  the clients runs on the share-manager's own node
+- Each client runs:
+  `fio --name=bench --rw=<mode> --bs=<1M|4k> --size=256M --time_based --runtime=10 --filename=/data/bench-$POD.bin`
+  (buffered I/O, psync engine — page-cache effects are part of the measurement,
+  as they are in real workloads)
 
-### Results — ganesha V12.0 (current build)
+### Results (aggregate MiB/s)
 
-#### Sequential I/O (1M block size)
-
-| Setup | Write (MiB/s) | Read (MiB/s) |
-|-------|:-------------:|:------------:|
-| RWO baseline (direct block) | 1568 | 251 |
-| RWX 1 pod (NFS) | 217 | 1589 |
-| RWX 2 pods total | 311 | 2180 |
-| RWX 3 pods total | 473 | 2643 |
-
-#### Random I/O (4k block size)
-
-| Setup | Write (MiB/s) | Read (MiB/s) |
-|-------|:-------------:|:------------:|
-| RWO baseline (direct block) | 44.3 | 0.6 |
-| RWX 1 pod (NFS) | 169 | 27.8 |
-| RWX 2 pods total | 336 | 19.6 |
-| RWX 3 pods total | 507 | 42.5 |
-
-### Comparison: V12.0 vs v9.12 (Longhorn share-manager base image)
-
-| Metric | V12.0 | v9.12 | Winner |
-|--------|:-----:|:-----:|:------:|
-| Seq Read 1 pod | 1589 | 567 | V12.0 (2.8x faster) |
-| Seq Read 3 pods | 2643 | 2611 | ~ equal |
-| Seq Write 1 pod | 217 | 245 | v9.12 (slightly) |
-| Seq Write 3 pods | 473 | 820 | v9.12 |
-| Rand Write 1 pod | 169 | 201 | v9.12 |
-| Rand Write 3 pods | 507 | 612 | v9.12 |
-| Rand Read 1 pod | 27.8 | 8.3 | V12.0 (3.4x faster) |
-| Rand Read 3 pods | 42.5 | 42.3 | ~ equal |
+| Setup | Seq Write (1M) | Seq Read (1M) | Rand Write (4k) | Rand Read (4k) |
+|-------|:--:|:--:|:--:|:--:|
+| RWO baseline (direct block) | 794 | 2077 | 221 | 18 |
+| RWX 1 pod (NFS) | 297 | 1606 | 223 | 30 |
+| RWX 2 pods total | 345 | 2016 | 295 | 35 |
+| RWX 3 pods total | 381 | 2306 | 300 | 41 |
 
 ### Analysis
 
-**V12.0 is significantly faster for reads** — especially single-client sequential reads (2.8x improvement, 1589 vs 567 MiB/s) and random 4k reads (3.4x improvement, 27.8 vs 8.3 MiB/s). This suggests V12.0 has a much better NFS read-ahead cache and MDCache implementation.
-
-**v9.12 was slightly faster for writes** — sequential writes (245 vs 217 MiB/s single, 820 vs 473 MiB/s with 3 pods). This could be due to V12.0 having stricter write ordering or different async write semantics.
-
-**Bottom line**: V12.0 gives us much better read performance (the common case for shared volumes) at a small cost in write throughput. The trade-off is favorable for most RWX use cases like shared config, web assets, or read-heavy data.
+- **Reads scale with client count** and approach or exceed the direct-block
+  baseline — the NFS client page cache and ganesha's MDCache do a lot of the
+  work for a 256M working set.
+- **Sequential writes cost roughly 2–2.5x** vs. direct block access; the NFS
+  round trips and write ordering dominate. Aggregate write throughput still
+  grows with more clients.
+- **Random 4k writes** over NFS match the direct block baseline thanks to
+  client-side write coalescing; random 4k reads benefit from read-ahead.
+- Numbers are aggregate throughput on this specific setup — treat them as a
+  ballpark, not as universal.
 
 ## Limitations
 

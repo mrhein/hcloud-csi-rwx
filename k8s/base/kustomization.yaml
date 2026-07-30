@@ -13,12 +13,12 @@ resources:
 images:
   - name: hcloud-csi-rwx
     newName: ghcr.io/mrhein/hcloud-csi-rwx
-    newTag: v0.1.1
+    newTag: v0.1.2
 
 # Common labels applied to all resources
 labels:
   - pairs:
       app.kubernetes.io/name: hcloud-csi-rwx
-      app.kubernetes.io/version: v0.1.0
+      app.kubernetes.io/version: v0.1.2
       app.kubernetes.io/managed-by: kustomize
     includeSelectors: false

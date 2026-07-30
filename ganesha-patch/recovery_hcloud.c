@@ -12,7 +12,7 @@
  *   - ported to the nfs-ganesha V12.0 recovery backend API
  *     (nfs4_add_clid_entry, changed callback signatures)
  *   - hardened HTTP handling (timeouts, NUL termination, error paths
- *     instead of assert())
+ *     instead of assert(), no trailing NUL in request bodies)
  *   - optional bearer-token authentication (RECOVERY_BACKEND_TOKEN)
  *
  * This program is free software; you can redistribute it and/or
@@ -492,7 +492,7 @@ static int hcloud_recov_init(void)
 
 	PTHREAD_RWLOCK_wrlock(&recov_lock);
 	res = http_call(HTTP_POST, recov_url,
-		payload, strlen(payload) + 1,
+		payload, strlen(payload),
 		&response, &response_size);
 	PTHREAD_RWLOCK_unlock(&recov_lock);
 	if (res != 0) {
@@ -533,7 +533,7 @@ static void hcloud_recov_end_grace(void)
 	snprintf(payload, sizeof(payload), "{\"version\": \"%s\"}", recov_version);
 
 	PTHREAD_RWLOCK_wrlock(&recov_lock);
-	res = http_call(HTTP_PUT, url, payload, strlen(payload) + 1, &response, &response_size);
+	res = http_call(HTTP_PUT, url, payload, strlen(payload), &response, &response_size);
 	PTHREAD_RWLOCK_unlock(&recov_lock);
 	if (res != 0) {
 		LogEvent(COMPONENT_CLIENTID,
@@ -599,7 +599,7 @@ static void hcloud_add_clid(nfs_client_id_t *clientid)
 	encoded_cid_recov_tag = NULL;
 
 	PTHREAD_RWLOCK_wrlock(&recov_lock);
-	res = http_call(HTTP_PUT, url, payload, strlen(payload) + 1, &response, &response_size);
+	res = http_call(HTTP_PUT, url, payload, strlen(payload), &response, &response_size);
 	PTHREAD_RWLOCK_unlock(&recov_lock);
 	if (res != 0) {
 		LogEvent(COMPONENT_CLIENTID,
@@ -837,7 +837,7 @@ static void hcloud_add_revoke_fh(nfs_client_id_t *delr_clid, nfs_fh4 *delr_handl
 	encoded_rhdlstr = NULL;
 
 	PTHREAD_RWLOCK_wrlock(&recov_lock);
-	res = http_call(HTTP_PUT, url, payload, strlen(payload) + 1, &response, &response_size);
+	res = http_call(HTTP_PUT, url, payload, strlen(payload), &response, &response_size);
 	PTHREAD_RWLOCK_unlock(&recov_lock);
 	if (res != 0) {
 		LogEvent(COMPONENT_CLIENTID,

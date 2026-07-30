@@ -133,6 +133,9 @@ pub fn service_json(volume: &str) -> Value {
 pub fn share_pod_json(volume: &str, node: &str, pvc_name: &str, pvc_namespace: &str) -> Value {
     let vn = volume_name(volume);
     let mut env = vec![
+        // hostNetwork: pod IP == node IP — the share-manager reports this as
+        // its NFS endpoint (mounts go directly to the node, no kube-proxy).
+        json!({ "name": "NFS_SVC_IP", "valueFrom": { "fieldRef": { "fieldPath": "status.podIP" } } }),
         json!({ "name": "LEASE_LIFETIME", "value": lease_lifetime() }),
         json!({ "name": "GRACE_PERIOD", "value": grace_period() }),
         json!({ "name": "NFS_ALLOWED_CLIENTS", "value": nfs_allowed_clients() }),
@@ -178,7 +181,6 @@ pub fn share_pod_json(volume: &str, node: &str, pvc_name: &str, pvc_namespace: &
                     "--device", "/export",
                     "--volume", volume,
                     "--mount-point", "/export",
-                    "--svc-ip", vn,
                     "--api-listen", "0.0.0.0:9500",
                     "--skip-mount"
                 ],
@@ -276,6 +278,13 @@ mod tests {
             pod["spec"]["nodeSelector"]["kubernetes.io/hostname"],
             "node-1"
         );
+        // NFS endpoint must come from the pod/node IP (downward API), and the
+        // service name must NOT be passed as --svc-ip.
+        let env = pod["spec"]["containers"][0]["env"].as_array().unwrap();
+        assert!(env.iter().any(|e| e["name"] == "NFS_SVC_IP"
+            && e["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"));
+        let args = pod["spec"]["containers"][0]["args"].as_array().unwrap();
+        assert!(!args.iter().any(|a| a == "--svc-ip"));
         // service selector must match pod labels
         let svc = service_json("pvc-abc");
         assert_eq!(svc["spec"]["selector"]["app"], DRIVER_NAME);

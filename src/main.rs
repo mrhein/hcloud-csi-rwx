@@ -233,6 +233,9 @@ async fn main() -> anyhow::Result<()> {
             let mut health_interval = tokio::time::interval(std::time::Duration::from_secs(10));
             health_interval.tick().await;
 
+            // Exit non-zero on health failures so the pod ends up in phase
+            // Failed and the failover controller reacts immediately.
+            let mut healthy_shutdown = false;
             loop {
                 tokio::select! {
                     _ = health_interval.tick() => {
@@ -249,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     _ = tokio::signal::ctrl_c() => {
                         info!("received SIGINT, shutting down");
+                        healthy_shutdown = true;
                         break;
                     }
                 }
@@ -259,6 +263,9 @@ async fn main() -> anyhow::Result<()> {
                 let _ = block::unmount_device(&mount_point);
             }
             api_task.abort();
+            if !healthy_shutdown {
+                std::process::exit(1);
+            }
             Ok(())
         }
     }

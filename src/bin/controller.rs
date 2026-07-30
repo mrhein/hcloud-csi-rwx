@@ -205,7 +205,9 @@ async fn reconcile_body(
                     }
                     Ok(Action::requeue(std::time::Duration::from_secs(60)))
                 }
-                "Failed" | "Unknown" => {
+                // "Succeeded" too: with restartPolicy Never an exited
+                // share-manager (e.g. ganesha died) stays dead otherwise.
+                "Failed" | "Unknown" | "Succeeded" => {
                     warn!(pvc = %pvc_name, phase = %phase, "share-manager unhealthy, failing over");
                     start_failover(&ctx, &mut st, &volume, &pvc_name, &pvc_ns, &pod_api, &pod_name).await
                 }
