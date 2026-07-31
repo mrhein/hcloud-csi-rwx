@@ -431,10 +431,16 @@ Local build requirements: Rust (see `Cargo.toml` for edition), `protoc`
 (protobuf compiler — needed by `build.rs` for the CSI spec codegen).
 
 ```bash
-cargo test          # unit tests
-cargo clippy --all-targets
+cargo test                              # unit tests
+cargo clippy --all-targets -- -D warnings
+cargo llvm-cov --summary-only           # coverage, CI gates at 90% lines
 cargo build --release
 ```
+
+The code lives in a library crate (`src/lib.rs`); the binaries are thin CLI
+shells. External commands go through `src/exec.rs` and the Kubernetes API
+through a fake service in `src/testing.rs`, so the provisioning and failover
+logic is unit-testable without a cluster. See [AGENTS.md](AGENTS.md).
 
 Container image (multi-arch capable, ganesha stage takes a while):
 

@@ -5,6 +5,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Test coverage 27% -> 93%.** The code moved into a library crate with thin
+  binary shells, external commands now go through an injectable
+  `CommandRunner`/`ProcessSpawner` (`src/exec.rs`), and a fake Kubernetes API
+  service (`src/testing.rs`) makes the provisioning and failover paths
+  unit-testable without a cluster. 154 tests, CI gates at 90% lines.
+  No behaviour change intended; the share-manager run loop was split into
+  named functions along the way.
+
 ## [0.2.0] - 2026-07-31
 
 ### Added

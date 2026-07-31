@@ -331,3 +331,137 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod kube_tests {
+    use super::*;
+    use crate::testing::{empty_list, node_list, pod_list, FakeApi};
+    use serde_json::json;
+
+    fn sm_pod(name: &str, node: &str) -> serde_json::Value {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "hcloud-csi-rwx",
+                         "labels": {"app": "hcloud-csi-rwx", "rwx-volume": "v"}},
+            "spec": {"nodeName": node},
+            "status": {"phase": "Running"}
+        })
+    }
+
+    #[tokio::test]
+    async fn pick_node_returns_first_ready_and_free_node() {
+        let fake = FakeApi::new()
+            .ok("GET /api/v1/namespaces/hcloud-csi-rwx/pods", empty_list("PodList"))
+            .ok("GET /api/v1/nodes", node_list(&[("n1", true), ("n2", true)]));
+        let node = pick_node(&fake.client(), &[]).await.unwrap();
+        assert_eq!(node, "n1");
+    }
+
+    #[tokio::test]
+    async fn pick_node_skips_not_ready_nodes() {
+        let fake = FakeApi::new()
+            .ok("GET /api/v1/namespaces/hcloud-csi-rwx/pods", empty_list("PodList"))
+            .ok("GET /api/v1/nodes", node_list(&[("n1", false), ("n2", true)]));
+        assert_eq!(pick_node(&fake.client(), &[]).await.unwrap(), "n2");
+    }
+
+    #[tokio::test]
+    async fn pick_node_honours_avoid_list() {
+        let fake = FakeApi::new()
+            .ok("GET /api/v1/namespaces/hcloud-csi-rwx/pods", empty_list("PodList"))
+            .ok("GET /api/v1/nodes", node_list(&[("n1", true), ("n2", true)]));
+        let node = pick_node(&fake.client(), &["n1".into()]).await.unwrap();
+        assert_eq!(node, "n2");
+    }
+
+    #[tokio::test]
+    async fn pick_node_skips_nodes_that_already_host_a_share_manager() {
+        // ganesha binds :2049 on the host, so one share-manager per node.
+        let fake = FakeApi::new()
+            .ok(
+                "GET /api/v1/namespaces/hcloud-csi-rwx/pods",
+                pod_list(vec![sm_pod("share-manager-a", "n1")]),
+            )
+            .ok("GET /api/v1/nodes", node_list(&[("n1", true), ("n2", true)]));
+        assert_eq!(pick_node(&fake.client(), &[]).await.unwrap(), "n2");
+    }
+
+    #[tokio::test]
+    async fn pick_node_errors_when_nothing_is_left() {
+        let fake = FakeApi::new()
+            .ok("GET /api/v1/namespaces/hcloud-csi-rwx/pods", empty_list("PodList"))
+            .ok("GET /api/v1/nodes", node_list(&[("n1", true)]));
+        let err = pick_node(&fake.client(), &["n1".into()]).await.unwrap_err();
+        assert!(err.to_string().contains("no suitable node"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn pick_node_propagates_api_errors() {
+        let fake = FakeApi::new(); // everything 404s
+        assert!(pick_node(&fake.client(), &[]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn node_is_ready_reflects_condition() {
+        let ready = FakeApi::new()
+            .ok("GET /api/v1/nodes/n1", crate::testing::node("n1", true));
+        assert!(node_is_ready(&ready.client(), "n1").await);
+
+        let not_ready = FakeApi::new()
+            .ok("GET /api/v1/nodes/n1", crate::testing::node("n1", false));
+        assert!(!node_is_ready(&not_ready.client(), "n1").await);
+    }
+
+    #[tokio::test]
+    async fn node_is_ready_false_when_node_is_gone_or_conditionless() {
+        let missing = FakeApi::new();
+        assert!(!node_is_ready(&missing.client(), "gone").await);
+
+        let bare = FakeApi::new().ok(
+            "GET /api/v1/nodes/n1",
+            json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n1"}}),
+        );
+        assert!(!node_is_ready(&bare.client(), "n1").await);
+    }
+
+    #[test]
+    fn pure_helpers_and_env_overrides() {
+        assert_eq!(backing_pvc_name("v"), "v-backing");
+        assert_eq!(share_pod_name("v"), "share-manager-v");
+        assert_eq!(state_cm_name("v"), "state-v");
+
+        let j = backing_pvc_json("pvc-1", "5Gi", "hcloud-volumes");
+        assert_eq!(j["spec"]["storageClassName"], "hcloud-volumes");
+        assert_eq!(j["spec"]["resources"]["requests"]["storage"], "5Gi");
+        assert_eq!(j["spec"]["accessModes"][0], "ReadWriteOnce");
+        assert_eq!(j["metadata"]["labels"]["rwx-volume"], "pvc-1");
+
+        // defaults (no env set in this process)
+        assert_eq!(share_namespace(), "hcloud-csi-rwx");
+        assert_eq!(pull_policy(), "IfNotPresent");
+        assert_eq!(backing_storage_class(), "hcloud-volumes");
+        assert_eq!(lease_lifetime(), "60");
+        assert_eq!(grace_period(), "90");
+        assert_eq!(export_mode(), "0777");
+        assert_eq!(monitoring_port(), "9587");
+        assert!(nfs_allowed_clients().contains("10.0.0.0/8"));
+        assert!(image().starts_with("ghcr.io/mrhein/hcloud-csi-rwx:v"));
+    }
+
+    #[test]
+    fn service_and_pod_specs_are_consistent() {
+        let svc = service_json("pvc-x");
+        assert_eq!(svc["spec"]["ports"][0]["port"], 2049);
+        assert_eq!(svc["spec"]["ports"][1]["port"], 9500);
+
+        let pod = share_pod_json("pvc-x", "n1", "claim", "ns1");
+        assert_eq!(pod["spec"]["hostNetwork"], true);
+        assert_eq!(pod["spec"]["restartPolicy"], "Never");
+        assert_eq!(pod["spec"]["containers"][0]["securityContext"]["privileged"], true);
+        assert_eq!(pod["metadata"]["labels"]["rwx-pvc-namespace"], "ns1");
+        // recovery token is optional so the pod starts without the secret
+        let env = pod["spec"]["containers"][0]["env"].as_array().unwrap();
+        let tok = env.iter().find(|e| e["name"] == "RECOVERY_BACKEND_TOKEN").unwrap();
+        assert_eq!(tok["valueFrom"]["secretKeyRef"]["optional"], true);
+    }
+}

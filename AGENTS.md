@@ -13,10 +13,14 @@ siehe README → Components.
 ## Bauen & Testen
 
 ```bash
-cargo test --locked                         # 21 Unit-Tests
+cargo test --locked                         # Unit-Tests (aktuell 154)
 cargo clippy --all-targets --locked -- -D warnings   # CI erzwingt warning-frei
+cargo llvm-cov --locked --summary-only      # CI-Gate: >= 90 % Lines
 kubectl kustomize k8s/base >/dev/null       # Manifeste müssen rendern
 ```
+
+Auf macOS braucht `cargo llvm-cov` ein höheres Deskriptor-Limit
+(`ulimit -n 8192`), sonst bricht sccache mit „Too many open files" ab.
 
 - `protoc` wird von `build.rs` benötigt (CSI-Codegen).
 - Container-Image: `podman build -f Containerfile .` — Rust-Stage wird
@@ -33,6 +37,32 @@ kubectl kustomize k8s/base >/dev/null       # Manifeste müssen rendern
   neuen Major und pflegt **keine** Stable-Branches ab V7. Es gibt also keinen
   Backport-Kanal — Fixes kommen nur über den nächsten Major. Bewusst auf
   einem getesteten Major bleiben und kontrolliert springen.
+
+## Testarchitektur
+
+Der gesamte Code liegt in der Bibliothek (`src/lib.rs`); die Binaries unter
+`src/bin/` und `src/main.rs` sind dünne CLI-Shells. Zwei Abstraktionen machen
+alles testbar — **beide benutzen, statt direkt zu I/O zu greifen**:
+
+- `src/exec.rs` — jede externe Kommandoausführung (`mount`, `mkfs.ext4`,
+  `blkid`, `chmod`, `ganesha.nfsd`) läuft über `CommandRunner` /
+  `ProcessSpawner`. `SystemExec` ist die echte Implementierung, `FakeExec`
+  zeichnet Aufrufe auf und lässt sich per `.on()` / `.on_error()` /
+  `.alive_for()` skripten. Niemals `Command::new` direkt aufrufen.
+- `src/testing.rs` — `FakeApi` ist ein Tower-Service, aus dem sich ein
+  `kube::Client` bauen lässt (`kube::Client::new` nimmt jeden Service).
+  Antworten per `.ok()` / `.err()` skripten, Requests per `.called()` /
+  `.bodies()` prüfen. Damit sind Reconcile- und Failover-Pfade ohne Cluster
+  abgedeckt.
+
+Tests leben als `#[cfg(test)] mod` im jeweiligen Modul (Zugriff auf private
+Items). Neue Logik gehört in die Bibliothek, nicht in `main.rs` — dort
+sinkt sie sonst unter das Coverage-Gate.
+
+**Wichtig:** Coverage ersetzt den Cluster-Lauf nicht. Fehler wie der
+Service-Name statt Node-IP im NFS-Endpoint oder das NUL-Byte im HTTP-Body
+hätte kein Mock gefunden — vor jedem Release Rollout, Failover-Test und
+Benchmark auf echter Hardware fahren.
 
 ## Architektur-Invarianten (nicht verletzen)
 

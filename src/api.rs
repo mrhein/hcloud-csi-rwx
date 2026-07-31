@@ -60,3 +60,80 @@ pub fn new_state(volume: &str) -> SharedState {
         error: None,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn get(state: SharedState, uri: &str) -> (StatusCode, serde_json::Value) {
+        let resp = app(state)
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn healthz_flips_with_readiness() {
+        let st = new_state("vol");
+        let resp = app(st.clone())
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        st.write().await.ready = true;
+        let resp = app(st)
+            .oneshot(Request::builder().uri("/healthz").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn endpoint_is_unavailable_until_ready() {
+        let st = new_state("vol");
+        let (status, _) = get(st.clone(), "/endpoint").await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+        {
+            let mut s = st.write().await;
+            s.ready = true;
+            s.endpoint = Some("10.0.0.1:/vol".into());
+        }
+        let (status, body) = get(st, "/endpoint").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["endpoint"], "10.0.0.1:/vol");
+        assert_eq!(body["ready"], true);
+    }
+
+    #[tokio::test]
+    async fn state_endpoint_always_answers() {
+        let st = new_state("my-pvc");
+        st.write().await.error = Some("boom".into());
+        let (status, body) = get(st, "/state").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["volume"], "my-pvc");
+        assert_eq!(body["error"], "boom");
+        assert_eq!(body["ready"], false);
+    }
+
+    #[tokio::test]
+    async fn fresh_state_has_sane_defaults() {
+        let st = new_state("v");
+        let s = st.read().await;
+        assert!(!s.ready);
+        assert!(s.endpoint.is_none());
+        assert!(s.error.is_none());
+        assert_eq!(s.volume, "v");
+        // ShareState is Clone + Serialize
+        let json = serde_json::to_string(&s.clone()).unwrap();
+        assert!(json.contains("\"ready\":false"));
+    }
+}

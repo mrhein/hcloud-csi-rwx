@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
-use tokio::process::{Child, Command};
 use tracing::{info, warn};
+
+use crate::exec::{args, ProcessHandle, ProcessSpawner};
 
 /// NFS export configuration for a single volume.
 pub struct ExportConfig {
@@ -152,7 +152,7 @@ EXPORT
 
 /// Manages the ganesha daemon process lifecycle.
 pub struct Ganesha {
-    child: Option<Child>,
+    child: Option<Box<dyn ProcessHandle>>,
     config_path: PathBuf,
 }
 
@@ -165,20 +165,31 @@ impl Ganesha {
         }
     }
 
-    pub async fn start(&mut self, cfg: &ExportConfig) -> anyhow::Result<()> {
+    /// Path of the config file this instance writes.
+    pub fn config_path(&self) -> &Path {
+        &self.config_path
+    }
+
+    /// Write the config and spawn ganesha.nfsd.
+    pub async fn start(
+        &mut self,
+        spawner: &dyn ProcessSpawner,
+        cfg: &ExportConfig,
+    ) -> anyhow::Result<()> {
         std::fs::write(&self.config_path, cfg.render())?;
         info!(path = %self.config_path.display(), "wrote ganesha config");
 
-        let child = Command::new("ganesha.nfsd")
-            .arg("-F")
-            .arg("-p")
-            .arg("/var/run/ganesha.pid")
-            .arg("-f")
-            .arg(&self.config_path)
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true)
-            .spawn()
+        let child = spawner
+            .spawn(
+                "ganesha.nfsd",
+                &args(&[
+                    "-F",
+                    "-p",
+                    "/var/run/ganesha.pid",
+                    "-f",
+                    &self.config_path.to_string_lossy(),
+                ]),
+            )
             .map_err(|e| anyhow::anyhow!("failed to spawn ganesha.nfsd: {e}"))?;
 
         self.child = Some(child);
@@ -192,25 +203,18 @@ impl Ganesha {
 
     pub fn is_running(&mut self) -> bool {
         match &mut self.child {
-            Some(c) => c.try_wait().ok().flatten().is_none(),
+            Some(c) => c.is_running(),
             None => false,
         }
     }
 
     pub async fn stop(&mut self) {
         if let Some(mut c) = self.child.take() {
-            let _ = c.start_kill();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                c.wait(),
-            )
-            .await
-            {
-                Ok(Ok(_)) => info!("ganesha.nfsd stopped"),
-                _ => {
-                    warn!("ganesha.nfsd didn't stop gracefully, killing");
-                    let _ = c.kill().await;
-                }
+            c.start_kill();
+            if c.wait_with_timeout(std::time::Duration::from_secs(5)).await {
+                info!("ganesha.nfsd stopped");
+            } else {
+                warn!("ganesha.nfsd didn't stop gracefully");
             }
         }
     }
@@ -219,11 +223,146 @@ impl Ganesha {
 impl Drop for Ganesha {
     fn drop(&mut self) {
         if let Some(mut c) = self.child.take() {
-            let _ = c.start_kill();
+            c.start_kill();
         }
     }
 }
 
 pub fn endpoint(svc_ip: &str, pseudo_path: &str) -> String {
     format!("{svc_ip}:{pseudo_path}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::FakeExec;
+
+    fn tmpdir(name: &str) -> String {
+        let d = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&d);
+        d.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn endpoint_joins_ip_and_pseudo() {
+        assert_eq!(endpoint("10.0.0.1", "/vol"), "10.0.0.1:/vol");
+    }
+
+    #[test]
+    fn config_value_validation() {
+        assert!(validate_config_value("pvc-1234").is_ok());
+        assert!(validate_config_value("10.0.0.0/8, 192.168.0.0/16").is_ok());
+        assert!(validate_config_value("*").is_ok());
+        assert!(validate_config_value("").is_err());
+        assert!(validate_config_value("a;\nEXPORT {").is_err());
+    }
+
+    #[test]
+    fn render_open_export_has_no_client_block() {
+        for open in ["*", "0.0.0.0/0"] {
+            let cfg = ExportConfig { allowed_clients: open.into(), ..Default::default() };
+            let r = cfg.render();
+            assert!(!r.contains("CLIENT {"), "{open} should not restrict clients");
+            assert!(r.contains("Access_Type = RW;"));
+        }
+    }
+
+    #[test]
+    fn render_metrics_toggle() {
+        let on = ExportConfig::default().render();
+        assert!(on.contains("Enable_Metrics = true;"));
+        assert!(on.contains("Monitoring_Port = 9587;"));
+
+        let off = ExportConfig { monitoring_port: 0, ..Default::default() }.render();
+        assert!(!off.contains("Enable_Metrics"));
+        assert!(!off.contains("Monitoring_Port"));
+    }
+
+    #[test]
+    fn render_interpolates_all_fields() {
+        let cfg = ExportConfig {
+            export_id: 7,
+            export_path: "/export/x".into(),
+            pseudo_path: "/x".into(),
+            lease_lifetime: 30,
+            grace_period: 45,
+            allowed_clients: "10.1.0.0/16".into(),
+            monitoring_port: 1234,
+        };
+        let r = cfg.render();
+        for needle in [
+            "Export_Id = 7;",
+            "Path = /export/x;",
+            "Pseudo = /x;",
+            "Lease_Lifetime = 30;",
+            "Grace_Period = 45;",
+            "Filesystem_id = 7.0;",
+            "Clients = 10.1.0.0/16;",
+            "Monitoring_Port = 1234;",
+            "RecoveryBackend = hcloud;",
+            "Name = VFS;",
+        ] {
+            assert!(r.contains(needle), "missing {needle} in:\n{r}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ganesha_start_writes_config_and_spawns() {
+        let dir = tmpdir("hcloud-ganesha-start");
+        let mut g = Ganesha::new(&dir);
+        let fake = FakeExec::new();
+        g.start(&fake, &ExportConfig::default()).await.unwrap();
+
+        let written = std::fs::read_to_string(g.config_path()).unwrap();
+        assert!(written.contains("EXPORT"));
+        assert!(fake.ran("ganesha.nfsd -F -p /var/run/ganesha.pid -f"));
+        assert!(g.is_running());
+
+        g.stop().await;
+        assert!(!g.is_running(), "no child after stop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ganesha_reports_spawn_failure() {
+        let dir = tmpdir("hcloud-ganesha-fail");
+        let mut g = Ganesha::new(&dir);
+        let fake = FakeExec::new().failing_spawn();
+        let err = g.start(&fake, &ExportConfig::default()).await.unwrap_err();
+        assert!(err.to_string().contains("failed to spawn ganesha.nfsd"));
+        assert!(!g.is_running());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ganesha_detects_dead_process() {
+        let dir = tmpdir("hcloud-ganesha-dead");
+        let mut g = Ganesha::new(&dir);
+        let fake = FakeExec::new().alive_for(1);
+        g.start(&fake, &ExportConfig::default()).await.unwrap();
+        assert!(g.is_running());
+        assert!(!g.is_running(), "process exited on the second poll");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ganesha_stop_without_start_is_noop() {
+        let dir = tmpdir("hcloud-ganesha-noop");
+        let mut g = Ganesha::new(&dir);
+        g.stop().await;
+        assert!(!g.is_running());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn ganesha_drop_kills_child() {
+        let dir = tmpdir("hcloud-ganesha-drop");
+        let fake = FakeExec::new();
+        {
+            let mut g = Ganesha::new(&dir);
+            g.start(&fake, &ExportConfig::default()).await.unwrap();
+        } // Drop runs here
+        assert!(fake.ran("ganesha.nfsd"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
