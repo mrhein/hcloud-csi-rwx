@@ -264,11 +264,18 @@ Useful series (each share-manager serves exactly one volume, so the pod's
 
 | Metric | Use |
 |---|---|
-| `nfs_latency_ms`, `nfs_latency_ms_by_export` | per-operation latency — the number to alert on |
-| `nfs_bytes_sent_total`, `nfs_bytes_received_total` | throughput per volume |
-| `nfs_errors_total` | NFS-level errors |
-| `client_requests_total`, `client_bytes_*_total` | per-client breakdown |
+| `nfsv4__op_latency` | histogram per NFSv4 op and status (`op="READ"`, `op="WRITE"`, …) — the number to alert on |
+| `compound__latency`, `compound__ops_count` | latency/count per COMPOUND, labeled by NFS status |
+| `nfs_bytes_sent_total`, `nfs_bytes_received_total` (+ `_by_export_`) | throughput |
+| `nfs_request_size_bytes`, `nfs_response_size_bytes` | I/O size distribution |
+| `client_bytes_sent_total`, `client_bytes_received_total` | per-client breakdown (label `client=<ip>`) |
 | `mdcache_cache_hits_total`, `mdcache_cache_misses_total` | ganesha metadata cache hit ratio |
+| `clients__confirmed_count`, `locks__count` | NFSv4 client/lock state — drops to 0 and recovers during failover |
+| `rpcs_in_flight`, `rpcs_received_total`, `rpcs_completed_total` | queue depth and RPC volume |
+| `ganesha_build_info` | ganesha version of the running share-manager |
+
+Around 1650 series per share-manager in total, including idmapper and
+libntirpc internals.
 
 Quick check without Prometheus:
 
@@ -365,8 +372,8 @@ ganesha is built from upstream `nfs-ganesha/nfs-ganesha` V13.0 (not the rancher 
 ## Benchmark Results
 
 fio benchmarks on a 3-node arm64 cluster (Hetzner Cloud, openSUSE MicroOS,
-k3s v1.36), v0.1.0 image (NFS-Ganesha V12.0 built from upstream).
-Measured 2026-07-24.
+k3s v1.36), v0.2.0 image (NFS-Ganesha V13.0 built from upstream).
+Measured 2026-07-31.
 
 ### Test Setup
 
@@ -383,23 +390,32 @@ Measured 2026-07-24.
 
 | Setup | Seq Write (1M) | Seq Read (1M) | Rand Write (4k) | Rand Read (4k) |
 |-------|:--:|:--:|:--:|:--:|
-| RWO baseline (direct block) | 794 | 2077 | 221 | 18 |
-| RWX 1 pod (NFS) | 297 | 1606 | 223 | 30 |
-| RWX 2 pods total | 345 | 2016 | 295 | 35 |
-| RWX 3 pods total | 381 | 2306 | 300 | 41 |
+| RWO baseline (direct block) | 1196 | 303 | 248 | 3.6 |
+| RWX 1 pod (NFS) | 306 | 1598 | 222 | 25 |
+| RWX 2 pods total | 346 | 1987 | 257 | 33 |
+| RWX 3 pods total | 369 | 2269 | 284 | 37 |
+
+Cross-checked against ganesha's own metrics: 59.5 GiB read and 18.8 GiB
+written over 322,900 RPCs during the run — consistent with the fio figures.
 
 ### Analysis
 
-- **Reads scale with client count** and approach or exceed the direct-block
-  baseline — the NFS client page cache and ganesha's MDCache do a lot of the
-  work for a 256M working set.
-- **Sequential writes cost roughly 2–2.5x** vs. direct block access; the NFS
+- **Reads scale with client count** and far exceed the direct-block baseline
+  for sequential access — the NFS client page cache and ganesha's MDCache do
+  a lot of the work for a 256M working set.
+- **Sequential writes cost roughly 3–4x** versus direct block access; NFS
   round trips and write ordering dominate. Aggregate write throughput still
   grows with more clients.
-- **Random 4k writes** over NFS match the direct block baseline thanks to
-  client-side write coalescing; random 4k reads benefit from read-ahead.
-- Numbers are aggregate throughput on this specific setup — treat them as a
-  ballpark, not as universal.
+- **Random 4k reads are ~7x better over NFS** than against the raw block
+  device here, again thanks to client-side caching and read-ahead.
+- **Take the RWO baseline with a grain of salt.** Between two runs a week
+  apart the same test on the same volume moved by −85% (seq read) and +51%
+  (seq write) — that is hcloud block-storage and page-cache variance, not
+  anything this driver controls. The RWX figures, by contrast, reproduced
+  within ~10%.
+- **V13.0 vs V12.0 (same hardware, one week apart): no measurable
+  difference** for RWX — every value within run-to-run noise. The upgrade is
+  about staying on a maintained major, not about throughput.
 
 ## Limitations
 
