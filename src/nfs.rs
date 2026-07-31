@@ -14,6 +14,10 @@ pub struct ExportConfig {
     /// Comma-separated client CIDRs allowed to mount the export.
     /// `*` or `0.0.0.0/0` exports to everyone (requires external firewalling).
     pub allowed_clients: String,
+    /// Port for the Prometheus metrics endpoint. `0` disables metrics.
+    /// ganesha binds it on `Bind_addr` (0.0.0.0) — with hostNetwork that is
+    /// the node IP, so firewall it like :2049.
+    pub monitoring_port: u16,
 }
 
 impl Default for ExportConfig {
@@ -25,6 +29,7 @@ impl Default for ExportConfig {
             lease_lifetime: 60,
             grace_period: 90,
             allowed_clients: "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16".into(),
+            monitoring_port: 9587,
         }
     }
 }
@@ -73,6 +78,17 @@ impl ExportConfig {
             )
         };
 
+        // Prometheus exposer (compiled in via USE_MONITORING). Enable_Metrics
+        // defaults to false upstream, so it only runs when we ask for it.
+        let metrics_block = if self.monitoring_port == 0 {
+            String::new()
+        } else {
+            format!(
+                "    Enable_Metrics = true;\n    Monitoring_Port = {};\n",
+                self.monitoring_port
+            )
+        };
+
         format!(
             r#"NFS_Core_Param
 {{
@@ -80,7 +96,7 @@ impl ExportConfig {
     fsid_device = false;
     Bind_addr = 0.0.0.0;
     Protocols = 4;
-}}
+{metrics_block}}}
 
 LOG {{
     Default_Log_Level = INFO;

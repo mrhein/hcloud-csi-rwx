@@ -5,6 +5,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-31
+
+### Added
+
+- **Prometheus metrics.** ganesha is now built with `USE_MONITORING=ON`, and
+  the generated config enables the exposer (`Enable_Metrics`,
+  `Monitoring_Port`, default **9587**, `MONITORING_PORT=0` disables it).
+  Share-manager pods declare the port and carry `prometheus.io/*` scrape
+  annotations. Exposes NFS latency/throughput/errors per export, per-client
+  I/O, and ganesha MDCache hit ratio. Costs no extra packages —
+  prometheus-cpp-lite ships as a submodule of ntirpc, which we already build.
+
+### Changed
+
+- **NFS-Ganesha V12.0 → V13.0.** Our patch applies unchanged; the recovery
+  backend API (`nfs4_add_clid_entry`, `struct nfs4_recovery_backend`) is
+  untouched between the two. V13 brings an idmapper fix that matters for
+  numeric-owner setups like ours: numeric UIDs/GIDs in `fattr4` (e.g. from
+  SETATTR) are now parsed numerically before falling back to passwd/PAM.
+- `build-ganesha.sh` no longer picks its own ntirpc/libkmip revisions.
+  It clones the ganesha tag and uses **ganesha's own submodule pins**,
+  asserting each expected commit. One upstream tag now determines the whole
+  dependency tree.
+- Firewall guidance and SECURITY.md updated for the new metrics port.
+
 ## [0.1.2] - 2026-07-30
 
 Restores fixes that were lost when v0.1.1 was built on a reset working tree.
@@ -66,7 +91,8 @@ Initial release.
 - Multi-arch container image (amd64 + arm64) on SUSE BCI, published to
   ghcr.io via GitHub Actions.
 
-[Unreleased]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mrhein/hcloud-csi-rwx/releases/tag/v0.1.0

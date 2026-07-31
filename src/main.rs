@@ -79,6 +79,10 @@ enum Command {
         /// Permissions applied to the export root so NFS clients can write.
         #[arg(long, env = "EXPORT_MODE", default_value = "0777")]
         export_mode: String,
+        /// Port for ganesha's Prometheus metrics endpoint (0 = disabled).
+        /// Bound on the node IP under hostNetwork — firewall it.
+        #[arg(long, env = "MONITORING_PORT", default_value_t = 9587)]
+        monitoring_port: u16,
     },
 }
 
@@ -125,6 +129,7 @@ async fn main() -> anyhow::Result<()> {
             grace_period,
             allowed_clients,
             export_mode,
+            monitoring_port,
         }) => {
             info!(device = %device, volume = %volume, "starting share-manager");
 
@@ -211,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
                 lease_lifetime,
                 grace_period,
                 allowed_clients,
+                monitoring_port,
             };
 
             let mut ganesha = Ganesha::new(&ganesha_dir);
@@ -305,6 +311,20 @@ mod tests {
         // default: restricted to private networks via CLIENT block
         assert!(rendered.contains("CLIENT {"));
         assert!(rendered.contains("Clients = 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16;"));
+        // metrics on by default
+        assert!(rendered.contains("Enable_Metrics = true;"));
+        assert!(rendered.contains("Monitoring_Port = 9587;"));
+    }
+
+    #[test]
+    fn ganesha_config_without_metrics() {
+        let cfg = ExportConfig {
+            monitoring_port: 0,
+            ..ExportConfig::default()
+        };
+        let rendered = cfg.render();
+        assert!(!rendered.contains("Enable_Metrics"));
+        assert!(!rendered.contains("Monitoring_Port"));
     }
 
     #[test]

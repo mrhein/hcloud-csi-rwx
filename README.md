@@ -1,13 +1,20 @@
 # hcloud-csi-rwx
 
-RWX (ReadWriteMany) volume support for Hetzner Cloud CSI — built in Rust, powered by NFS-Ganesha V12.0.
+RWX (ReadWriteMany) volume support for Hetzner Cloud CSI — built in Rust, powered by NFS-Ganesha V13.0.
 
 This project extends the Hetzner Cloud block storage (RWO only) with RWX capability using the same architecture as [Longhorn's share-manager](https://longhorn.io/docs/advanced-resources/rwx-workloads/): per RWX volume one share-manager pod mounts the block device and exports it via NFSv4. A dedicated recovery backend preserves NFSv4 client state across failovers.
 
-> **Project status**: v0.1.x — young project, in production use on the author's
+> **Project status**: v0.2.x — young project, in production use on the author's
 > 3-node arm64 k3s cluster, but interfaces and defaults may still change.
 > Review the [Security](#security) section before exposing it to untrusted
 > networks. Not affiliated with or endorsed by Hetzner.
+>
+> **AI transparency**: this project is developed with AI assistance
+> (OpenAI Codex and Anthropic Claude). Every change is reviewed by a human
+> maintainer, has to pass the test suite and clippy, and the storage path is
+> verified on a real Hetzner Cloud cluster — including failover and
+> benchmarks — before release. See [AGENTS.md](AGENTS.md) for the guardrails
+> agents work under.
 
 ## Architecture
 
@@ -37,7 +44,7 @@ This project extends the Hetzner Cloud block storage (RWO only) with RWX capabil
 │  │                      │    │  via `hcloud` recovery       │        │
 │  │  hcloud block volume │    │  backend for NFSv4 lock     │        │
 │  │  mounted at /export  │───▶│  state preservation         │        │
-│  │  ganesha.nfsd V12.0  │    └──────────────────────────────┘        │
+│  │  ganesha.nfsd V13.0  │    └──────────────────────────────┘        │
 │  │  exports via NFSv4   │                                          │
 │  └──────────┬──────────┘                                          │
 │             │ NFSv4 :2049 (node IP)                                │
@@ -97,6 +104,7 @@ into every share-manager pod it creates:
 | `SHARE_MANAGER_IMAGE` | released ghcr.io image | Image for share-manager pods |
 | `SHARE_MANAGER_PULL_POLICY` | IfNotPresent | imagePullPolicy for share-manager pods |
 | `BACKING_STORAGE_CLASS` | hcloud-volumes | Default backing StorageClass (per-SC override: `backingStorageClass` parameter) |
+| `MONITORING_PORT` | 9587 | Prometheus metrics port of the share-manager (`0` disables metrics) |
 
 Shorter lease/grace values = faster failover but less time for clients to
 reclaim locks. Follows the [Longhorn tuning guide](https://www.suse.com/support/kb/doc/?id=000019374).
@@ -110,7 +118,7 @@ reclaim locks. Follows the [Longhorn tuning guide](https://www.suse.com/support/
 - Nodes must have `nfs` and `nfs4` kernel modules (`modprobe nfs4`)
 - `kubectl` and `kustomize` (or `kubectl kustomize`)
 - **Firewall**: if your nodes have public IPs, block inbound TCP :2049 (NFS),
-  :9500 (share-manager API), and :9503 (recovery backend) from outside the
+  :9500 (share-manager API), :9503 (recovery backend) and :9587 (metrics) from outside the
   cluster — see [Security](#security)
 
 ### Option A: Install a release (recommended)
@@ -119,14 +127,14 @@ The container image is built automatically via GitHub Actions for
 `linux/amd64` and `linux/arm64`:
 
 ```bash
-# Pinned to the v0.1.2 release (image ghcr.io/mrhein/hcloud-csi-rwx:v0.1.2)
-kubectl apply -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.1.2"
+# Pinned to the v0.2.0 release (image ghcr.io/mrhein/hcloud-csi-rwx:v0.2.0)
+kubectl apply -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.2.0"
 ```
 
 ### Option B: Install from a local checkout
 
 ```bash
-git clone --branch v0.1.2 https://github.com/mrhein/hcloud-csi-rwx.git
+git clone --branch v0.2.0 https://github.com/mrhein/hcloud-csi-rwx.git
 cd hcloud-csi-rwx
 kubectl apply -k k8s/base
 ```
@@ -208,7 +216,7 @@ spec:
 ```bash
 kubectl delete -k k8s/base
 # Or from remote:
-kubectl delete -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.1.2"
+kubectl delete -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.2.0"
 ```
 
 ## Security
@@ -223,7 +231,7 @@ Read this before running the driver on nodes with public IPs.
   public node IPs you must widen this list — and then a firewall is
   mandatory. `NFS_ALLOWED_CLIENTS="*"` disables the restriction entirely.
 - **Firewall**: block TCP :2049 (NFS), :9500 (share-manager status API, read
-  only but unauthenticated), and :9503 (recovery backend) from outside the
+  only but unauthenticated), :9503 (recovery backend) and :9587 (Prometheus metrics) from outside the
   cluster, e.g. with Hetzner Cloud Firewalls. Share-manager pods use
   `hostNetwork`, so these ports are open on the node itself.
 - **Recovery backend auth** (recommended): create a token secret — the API
@@ -242,9 +250,41 @@ Read this before running the driver on nodes with public IPs.
 
 Report vulnerabilities via [SECURITY.md](SECURITY.md).
 
+## Monitoring
+
+Every share-manager exposes ganesha's Prometheus metrics on port **9587**
+(`MONITORING_PORT`, `0` disables it). The pods carry
+`prometheus.io/scrape`, `prometheus.io/port` and `prometheus.io/path`
+annotations, so a scrape-annotation-based Prometheus picks them up
+automatically; for the Prometheus Operator, point a `PodMonitor` at
+`app=hcloud-csi-rwx` in the `hcloud-csi-rwx` namespace.
+
+Useful series (each share-manager serves exactly one volume, so the pod's
+`rwx-volume` label identifies it):
+
+| Metric | Use |
+|---|---|
+| `nfs_latency_ms`, `nfs_latency_ms_by_export` | per-operation latency — the number to alert on |
+| `nfs_bytes_sent_total`, `nfs_bytes_received_total` | throughput per volume |
+| `nfs_errors_total` | NFS-level errors |
+| `client_requests_total`, `client_bytes_*_total` | per-client breakdown |
+| `mdcache_cache_hits_total`, `mdcache_cache_misses_total` | ganesha metadata cache hit ratio |
+
+Quick check without Prometheus:
+
+```bash
+NODE_IP=$(kubectl -n hcloud-csi-rwx get pod -l rwx-volume -o jsonpath='{.items[0].status.podIP}')
+kubectl -n hcloud-csi-rwx run curl --rm -it --image=curlimages/curl --restart=Never -- \
+  -s "http://$NODE_IP:9587/metrics" | head
+```
+
+The endpoint is **unauthenticated** and binds on the node IP under
+`hostNetwork` — treat it like :2049 and firewall it (see
+[Security](#security)).
+
 ## Components
 
-Four Rust binaries, all in a single container image built on SUSE BCI base with ganesha V12.0 compiled from upstream source:
+Four Rust binaries, all in a single container image built on SUSE BCI base with ganesha V13.0 compiled from upstream source:
 
 | Binary | Role |
 |--------|------|
@@ -308,7 +348,7 @@ EXPORT {
 ```
 
 The `RecoveryBackend = hcloud` is a patched-in recovery backend for
-nfs-ganesha V12.0, derived from Longhorn's `recovery_longhorn.c`
+nfs-ganesha V13.0, derived from Longhorn's `recovery_longhorn.c`
 (rancher/nfs-ganesha, LGPL-3.0) and adapted for this project — see the header
 of `ganesha-patch/recovery_hcloud.c` for the list of modifications. It stores
 client state via HTTP in a service named `hcloud-csi-rwx-recovery-backend` on
@@ -316,11 +356,11 @@ port 9503 (URL overridable via `HCLOUD_RECOVERY_BACKEND_URL`).
 
 ### ganesha Build
 
-ganesha is built from upstream `nfs-ganesha/nfs-ganesha` V12.0 (not the rancher fork), commit-pinned:
+ganesha is built from upstream `nfs-ganesha/nfs-ganesha` V13.0 (not the rancher fork), commit-pinned:
 
 - `ganesha-patch/hcloud-ganesha.patch` — unified diff wiring the `hcloud` recovery backend into 7 upstream files (enum, CMakeLists, config parser, init dispatch)
 - `ganesha-patch/recovery_hcloud.c` — the recovery backend implementation (LGPL-3.0-or-later, derived from Longhorn's `recovery_longhorn.c`)
-- `ganesha-patch/build-ganesha.sh` — clones upstream V12.0 + ntirpc v10.0 + libkmip (all commit-pinned), applies the patch, builds VFS-only
+- `ganesha-patch/build-ganesha.sh` — clones upstream V13.0 and uses **ganesha's own submodule pins** for ntirpc, libkmip and prometheus-cpp-lite (all asserted against expected commits), applies the patch, builds VFS-only with the Prometheus exposer
 
 ## Benchmark Results
 
@@ -413,7 +453,7 @@ hcloud-csi-rwx/
 ├── .github/workflows/
 │   └── build.yml           # CI: tests + clippy, multi-arch (amd64+arm64) container build
 ├── ganesha-patch/
-│   ├── build-ganesha.sh    # Clone upstream V12.0 (pinned) + apply patch + build
+│   ├── build-ganesha.sh    # Clone upstream V13.0 (pinned) + apply patch + build
 │   ├── hcloud-ganesha.patch  # Unified diff: 7 files wiring in the hcloud recovery backend
 │   └── recovery_hcloud.c  # Recovery backend (LGPL-3.0, derived from Longhorn's)
 └── src/
@@ -438,7 +478,7 @@ LGPL-3.0-or-later; the full LGPL-3.0 and GPL-3.0 texts are in
 listed in [NOTICE](NOTICE).
 
 This project includes:
-- **NFS-Ganesha V12.0** (upstream, LGPL-3.0-or-later) — built from source with our patch
+- **NFS-Ganesha V13.0** (upstream, LGPL-3.0-or-later) — built from source with our patch
 - **Longhorn recovery backend** (rancher/nfs-ganesha, LGPL-3.0-or-later) — basis of `recovery_hcloud.c`
 - **ntirpc v10.0** (BSD-3-Clause) — built from source
 - **libkmip** (ceph fork, Apache-2.0 OR BSD) — built from source

@@ -20,11 +20,15 @@ steps and affected versions.
   (client-asserted UIDs, `Squash = None`). Anyone who can reach TCP :2049 on
   a node from within `NFS_ALLOWED_CLIENTS` (default: RFC1918 ranges) has full
   read/write access to the export.
-- Share-manager pods run privileged with `hostNetwork` — ports :2049 (NFS)
-  and :9500 (status API) are bound on the node. The recovery backend listens
-  on :9503 behind a ClusterIP service.
+- Share-manager pods run privileged with `hostNetwork` — ports :2049 (NFS),
+  :9500 (status API) and :9587 (Prometheus metrics) are bound on the node.
+  The recovery backend listens on :9503 behind a ClusterIP service.
+- The metrics endpoint is unauthenticated. It exposes no file contents, but
+  does reveal export names and access patterns. Set `MONITORING_PORT=0` to
+  turn it off entirely.
 - On nodes with public IPs, an external firewall (e.g. Hetzner Cloud
-  Firewall) blocking :2049/:9500/:9503 from outside the cluster is mandatory.
+  Firewall) blocking :2049/:9500/:9503/:9587 from outside the cluster is
+  mandatory.
 - The recovery backend supports optional bearer-token authentication: create
   the `hcloud-csi-rwx-recovery-token` Secret (key `token`) in the
   `hcloud-csi-rwx` namespace (see README → Security).

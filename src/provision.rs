@@ -68,6 +68,11 @@ pub fn export_mode() -> String {
     env_or("EXPORT_MODE", "0777")
 }
 
+/// Port for ganesha's Prometheus metrics endpoint ("0" disables it).
+pub fn monitoring_port() -> String {
+    env_or("MONITORING_PORT", "9587")
+}
+
 /// Sanitize a volume/PVC name for use in resource names.
 pub fn volume_name(pvc: &str) -> String {
     pvc.replace(['.', '_'], "-")
@@ -140,6 +145,7 @@ pub fn share_pod_json(volume: &str, node: &str, pvc_name: &str, pvc_namespace: &
         json!({ "name": "GRACE_PERIOD", "value": grace_period() }),
         json!({ "name": "NFS_ALLOWED_CLIENTS", "value": nfs_allowed_clients() }),
         json!({ "name": "EXPORT_MODE", "value": export_mode() }),
+        json!({ "name": "MONITORING_PORT", "value": monitoring_port() }),
         json!({ "name": "RECOVERY_BACKEND_TOKEN", "valueFrom": {
             "secretKeyRef": {
                 "name": RECOVERY_TOKEN_SECRET,
@@ -153,12 +159,27 @@ pub fn share_pod_json(volume: &str, node: &str, pvc_name: &str, pvc_namespace: &
             env.push(json!({ "name": "HCLOUD_RECOVERY_BACKEND_URL", "value": url }));
         }
 
+    let mp = monitoring_port();
+    let metrics_on = mp != "0";
+    let mut ports = vec![
+        json!({ "containerPort": 9500, "name": "api" }),
+        json!({ "containerPort": 2049, "name": "nfs" }),
+    ];
+    let mut annotations = serde_json::Map::new();
+    if let (true, Ok(p)) = (metrics_on, mp.parse::<i64>()) {
+        ports.push(json!({ "containerPort": p, "name": "metrics" }));
+        annotations.insert("prometheus.io/scrape".into(), json!("true"));
+        annotations.insert("prometheus.io/port".into(), json!(mp.clone()));
+        annotations.insert("prometheus.io/path".into(), json!("/metrics"));
+    }
+
     json!({
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {
             "name": share_pod_name(&vn),
             "namespace": share_namespace(),
+            "annotations": annotations,
             "labels": {
                 "app": DRIVER_NAME,
                 "rwx-volume": volume,
@@ -185,10 +206,7 @@ pub fn share_pod_json(volume: &str, node: &str, pvc_name: &str, pvc_namespace: &
                     "--skip-mount"
                 ],
                 "env": env,
-                "ports": [
-                    { "containerPort": 9500, "name": "api" },
-                    { "containerPort": 2049, "name": "nfs" }
-                ],
+                "ports": ports,
                 "volumeMounts": [{
                     "name": "block-dev",
                     "mountPath": "/export",
@@ -285,6 +303,20 @@ mod tests {
             && e["valueFrom"]["fieldRef"]["fieldPath"] == "status.podIP"));
         let args = pod["spec"]["containers"][0]["args"].as_array().unwrap();
         assert!(!args.iter().any(|a| a == "--svc-ip"));
+    }
+
+    #[test]
+    fn share_pod_exposes_metrics_by_default() {
+        if std::env::var("MONITORING_PORT").is_ok() {
+            return; // env override active, defaults not under test
+        }
+        let pod = share_pod_json("pvc-abc", "node-1", "my-claim", "default");
+        let ports = pod["spec"]["containers"][0]["ports"].as_array().unwrap();
+        assert!(ports.iter().any(|p| p["name"] == "metrics" && p["containerPort"] == 9587));
+        assert_eq!(pod["metadata"]["annotations"]["prometheus.io/scrape"], "true");
+        assert_eq!(pod["metadata"]["annotations"]["prometheus.io/port"], "9587");
+        let env = pod["spec"]["containers"][0]["env"].as_array().unwrap();
+        assert!(env.iter().any(|e| e["name"] == "MONITORING_PORT" && e["value"] == "9587"));
         // service selector must match pod labels
         let svc = service_json("pvc-abc");
         assert_eq!(svc["spec"]["selector"]["app"], DRIVER_NAME);

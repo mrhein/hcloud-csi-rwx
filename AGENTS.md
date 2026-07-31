@@ -23,8 +23,16 @@ kubectl kustomize k8s/base >/dev/null       # Manifeste müssen rendern
   cross-kompiliert (TARGETARCH), ganesha-Stage läuft unter QEMU und dauert
   ~20 min.
 - Patch-Validierung: `git apply --check ganesha-patch/hcloud-ganesha.patch`
-  gegen ein Checkout von nfs-ganesha **V12.0** (Commit-Pins stehen in
+  gegen ein Checkout von nfs-ganesha **V13.0** (Commit-Pin steht in
   `ganesha-patch/build-ganesha.sh`).
+- Dependency-Pinning: Wir klonen nur den ganesha-Tag und nehmen dessen
+  **eigene Submodul-Pins** für ntirpc, libkmip und prometheus-cpp-lite; das
+  Skript asserted die erwarteten Commits. Niemals eigene Kombinationen
+  zusammenstellen, die Upstream nie getestet hat.
+- Upstream-Kadenz beachten: nfs-ganesha veröffentlicht alle 1–2 Wochen einen
+  neuen Major und pflegt **keine** Stable-Branches ab V7. Es gibt also keinen
+  Backport-Kanal — Fixes kommen nur über den nächsten Major. Bewusst auf
+  einem getesteten Major bleiben und kontrolliert springen.
 
 ## Architektur-Invarianten (nicht verletzen)
 
