@@ -144,6 +144,14 @@ async fn reconcile_body(
         return Ok(Action::requeue(std::time::Duration::from_secs(300)));
     }
 
+    // The claim is going away: DeleteVolume is tearing the volume down, and
+    // reconciling now would race it — `load_or_create_state` would recreate
+    // the state ConfigMap the driver just deleted and leave it orphaned.
+    if pvc.metadata.deletion_timestamp.is_some() {
+        info!(pvc = %pvc_name, "claim is terminating, leaving teardown to the CSI driver");
+        return Ok(Action::await_change());
+    }
+
     // Until the claim is bound, provisioning is still in the CSI driver's
     // hands — nothing to fail over yet.
     let Some(volume) = pvc
@@ -594,6 +602,22 @@ mod reconcile_tests {
         let action = reconcile(claim, ctx(&fake)).await.unwrap();
         assert_eq!(action, Action::requeue(std::time::Duration::from_secs(300)));
         assert!(fake.seen().is_empty(), "must not touch the API");
+    }
+
+    #[tokio::test]
+    async fn terminating_claims_are_left_to_the_csi_driver() {
+        // Regression: reconciling a claim that DeleteVolume is tearing down
+        // recreated the state ConfigMap the driver had just deleted, leaving
+        // it orphaned in the namespace forever.
+        let fake = FakeApi::new();
+        let mut claim = (*rwx_claim(Some(VOL))).clone();
+        claim.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                chrono::Utc::now(),
+            ));
+        let action = reconcile(Arc::new(claim), ctx(&fake)).await.unwrap();
+        assert_eq!(action, Action::await_change());
+        assert!(fake.seen().is_empty(), "must not touch the API at all");
     }
 
     #[tokio::test]
