@@ -1,0 +1,14 @@
+# Classic RWX workload: WordPress spread across all nodes, sharing
+# /var/www/html through an hcloud-csi-rwx volume, with MariaDB on a plain
+# RWO volume.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wordpress
+  labels:
+    app.kubernetes.io/name: wordpress
+    # Both workloads run unprivileged as non-root — enforce it.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

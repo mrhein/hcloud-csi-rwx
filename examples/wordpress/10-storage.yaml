@@ -1,0 +1,26 @@
+# Shared web root — this is what needs RWX: all WordPress replicas serve the
+# same uploads, plugins and themes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-content
+  namespace: wordpress
+spec:
+  accessModes: ["ReadWriteMany"]
+  storageClassName: hcloud-csi-rwx
+  resources:
+    requests:
+      storage: 10Gi
+---
+# The database stays single-writer on a normal block volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: wordpress-db
+  namespace: wordpress
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: hcloud-volumes
+  resources:
+    requests:
+      storage: 8Gi

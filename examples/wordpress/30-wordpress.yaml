@@ -1,0 +1,212 @@
+# Apache runs unprivileged on 8080 instead of root-bound 80.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: wordpress-apache
+  namespace: wordpress
+data:
+  ports.conf: |
+    Listen 8080
+  000-default.conf: |
+    <VirtualHost *:8080>
+        DocumentRoot /var/www/html
+        <Directory /var/www/html>
+            Options -Indexes +FollowSymLinks
+            AllowOverride All
+            Require all granted
+        </Directory>
+        # Never serve these, whatever ends up in the shared volume.
+        <FilesMatch "^(wp-config\.php|\.ht.*|.*\.sql|.*\.bak)$">
+            Require all denied
+        </FilesMatch>
+        ErrorLog /dev/stderr
+        CustomLog /dev/stdout combined
+    </VirtualHost>
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  selector:
+    app.kubernetes.io/name: wordpress
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wordpress
+  namespace: wordpress
+  labels:
+    app.kubernetes.io/name: wordpress
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wordpress
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wordpress
+    spec:
+      # One replica per node — the point of the exercise.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: wordpress
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 33          # www-data
+        runAsGroup: 33
+        fsGroup: 33
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        # Seed the shared volume once. Three replicas start at the same time,
+        # so the copy is guarded by an atomic mkdir lock; the losers wait for
+        # the winner to finish instead of writing over it.
+        - name: seed-webroot
+          image: wordpress:6.8-php8.3-apache
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              target=/var/www/html
+              if [ -f "$target/wp-includes/version.php" ]; then
+                echo "webroot already seeded"; exit 0
+              fi
+              if mkdir "$target/.seed-lock" 2>/dev/null; then
+                trap 'rmdir "$target/.seed-lock" 2>/dev/null || true' EXIT
+                echo "seeding webroot from /usr/src/wordpress"
+                tar -c -C /usr/src/wordpress . | tar -x -C "$target"
+                echo "seeded"
+              else
+                echo "another replica is seeding, waiting"
+                for _ in $(seq 1 150); do
+                  [ -f "$target/wp-includes/version.php" ] && { echo ok; exit 0; }
+                  sleep 2
+                done
+                echo "timed out waiting for seed" >&2; exit 1
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 500m, memory: 256Mi }
+          volumeMounts:
+            - { name: webroot, mountPath: /var/www/html }
+      containers:
+        - name: wordpress
+          image: wordpress:6.8-php8.3-apache
+          env:
+            - name: WORDPRESS_DB_HOST
+              value: wordpress-db
+            - name: WORDPRESS_DB_NAME
+              value: wordpress
+            - name: WORDPRESS_DB_USER
+              value: wordpress
+            - name: WORDPRESS_DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: wordpress-db, key: password }
+            # Session/nonce salts — without these all replicas would use
+            # different keys and log users out on every request that lands
+            # on another pod.
+            - { name: WORDPRESS_AUTH_KEY,         valueFrom: { secretKeyRef: { name: wordpress-salts, key: auth-key } } }
+            - { name: WORDPRESS_SECURE_AUTH_KEY,  valueFrom: { secretKeyRef: { name: wordpress-salts, key: secure-auth-key } } }
+            - { name: WORDPRESS_LOGGED_IN_KEY,    valueFrom: { secretKeyRef: { name: wordpress-salts, key: logged-in-key } } }
+            - { name: WORDPRESS_NONCE_KEY,        valueFrom: { secretKeyRef: { name: wordpress-salts, key: nonce-key } } }
+            - { name: WORDPRESS_AUTH_SALT,        valueFrom: { secretKeyRef: { name: wordpress-salts, key: auth-salt } } }
+            - { name: WORDPRESS_SECURE_AUTH_SALT, valueFrom: { secretKeyRef: { name: wordpress-salts, key: secure-auth-salt } } }
+            - { name: WORDPRESS_LOGGED_IN_SALT,   valueFrom: { secretKeyRef: { name: wordpress-salts, key: logged-in-salt } } }
+            - { name: WORDPRESS_NONCE_SALT,       valueFrom: { secretKeyRef: { name: wordpress-salts, key: nonce-salt } } }
+            - name: WORDPRESS_CONFIG_EXTRA
+              value: |
+                /* Behind the ingress TLS terminates upstream. */
+                if (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && $_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') {
+                    $_SERVER['HTTPS'] = 'on';
+                }
+                define('WP_HOME',    'https://wordpress.rhein.io');
+                define('WP_SITEURL', 'https://wordpress.rhein.io');
+                define('FORCE_SSL_ADMIN', true);
+                /* No code editing through the admin UI. Plugin/theme installs
+                   stay enabled on purpose — installing one and seeing it on
+                   all three replicas is the RWX demo. */
+                define('DISALLOW_FILE_EDIT', true);
+                define('WP_AUTO_UPDATE_CORE', 'minor');
+                define('WP_DEBUG', false);
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          ports:
+            - containerPort: 8080
+              name: http
+          startupProbe:
+            httpGet: { path: /wp-login.php, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /wp-login.php, port: 8080 }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /wp-login.php, port: 8080 }
+            periodSeconds: 20
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits:   { cpu: "1",  memory: 768Mi }
+          volumeMounts:
+            - { name: webroot, mountPath: /var/www/html }
+            - { name: apache-conf, mountPath: /etc/apache2/ports.conf, subPath: ports.conf, readOnly: true }
+            - { name: apache-conf, mountPath: /etc/apache2/sites-enabled/000-default.conf, subPath: 000-default.conf, readOnly: true }
+            # readOnlyRootFilesystem needs writable scratch space
+            - { name: apache-run,  mountPath: /run/apache2 }
+            - { name: apache-lock, mountPath: /run/lock }
+            - { name: tmp,         mountPath: /tmp }
+      volumes:
+        - name: webroot
+          persistentVolumeClaim:
+            claimName: wordpress-content
+        - name: apache-conf
+          configMap:
+            name: wordpress-apache
+        - name: apache-run
+          emptyDir: {}
+        - name: apache-lock
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: wordpress
+  namespace: wordpress
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+  labels:
+    app.kubernetes.io/name: wordpress
+spec:
+  ingressClassName: raefik
+  rules:
+    - host: wordpress.rhein.io
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: wordpress
+                port:
+                  number: 80
+  tls:
+    - hosts: ["wordpress.rhein.io"]
+      secretName: wordpress-tls

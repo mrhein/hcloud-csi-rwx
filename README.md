@@ -417,6 +417,15 @@ written over 322,900 RPCs during the run — consistent with the fio figures.
   difference** for RWX — every value within run-to-run noise. The upgrade is
   about staying on a maintained major, not about throughput.
 
+## Example workload
+
+[`examples/wordpress/`](examples/wordpress/) deploys the classic RWX case:
+three WordPress replicas, one per node, all serving the same
+`/var/www/html` from an `hcloud-csi-rwx` volume, with MariaDB on a plain RWO
+block device. It comes hardened — non-root containers, read-only root
+filesystems, a default-deny NetworkPolicy, generated secrets and TLS via
+cert-manager — and doubles as an end-to-end test of this driver.
+
 ## Limitations
 
 - **One share-manager per node**: with `hostNetwork: true`, ganesha binds port 2049 on the node. Only one share-manager can run per node (same limitation as Longhorn). The node picker refuses nodes that already host one.
