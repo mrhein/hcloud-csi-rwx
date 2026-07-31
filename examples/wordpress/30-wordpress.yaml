@@ -7,6 +7,14 @@ metadata:
 data:
   ports.conf: |
     Listen 8080
+  # WordPress core alone loads ~500 files per request and a plugin-heavy
+  # site far exceeds the 4000-file default. Sizing OPcache generously is
+  # what keeps the shared NFS webroot cheap: the bytecode is served from
+  # memory and only revalidated periodically.
+  opcache-tuning.ini: |
+    opcache.max_accelerated_files=20000
+    opcache.memory_consumption=192
+    opcache.interned_strings_buffer=16
   000-default.conf: |
     <VirtualHost *:8080>
         DocumentRoot /var/www/html
@@ -73,7 +81,7 @@ spec:
         # so the copy is guarded by an atomic mkdir lock; the losers wait for
         # the winner to finish instead of writing over it.
         - name: seed-webroot
-          image: wordpress:6.8-php8.3-apache
+          image: wordpress:7.0.2-php8.4-apache
           command: ["/bin/bash", "-euo", "pipefail", "-c"]
           args:
             - |
@@ -105,7 +113,7 @@ spec:
             - { name: webroot, mountPath: /var/www/html }
       containers:
         - name: wordpress
-          image: wordpress:6.8-php8.3-apache
+          image: wordpress:7.0.2-php8.4-apache
           env:
             - name: WORDPRESS_DB_HOST
               value: wordpress-db
@@ -167,6 +175,7 @@ spec:
             - { name: webroot, mountPath: /var/www/html }
             - { name: apache-conf, mountPath: /etc/apache2/ports.conf, subPath: ports.conf, readOnly: true }
             - { name: apache-conf, mountPath: /etc/apache2/sites-enabled/000-default.conf, subPath: 000-default.conf, readOnly: true }
+            - { name: apache-conf, mountPath: /usr/local/etc/php/conf.d/zz-opcache.ini, subPath: opcache-tuning.ini, readOnly: true }
             # readOnlyRootFilesystem needs writable scratch space
             - { name: apache-run,  mountPath: /run/apache2 }
             - { name: apache-lock, mountPath: /run/lock }
