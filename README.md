@@ -127,14 +127,14 @@ The container image is built automatically via GitHub Actions for
 `linux/amd64` and `linux/arm64`:
 
 ```bash
-# Pinned to the v0.2.1 release (image ghcr.io/mrhein/hcloud-csi-rwx:v0.2.1)
-kubectl apply -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.2.1"
+# Pinned to the v0.2.2 release (image ghcr.io/mrhein/hcloud-csi-rwx:v0.2.2)
+kubectl apply -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.2.2"
 ```
 
 ### Option B: Install from a local checkout
 
 ```bash
-git clone --branch v0.2.1 https://github.com/mrhein/hcloud-csi-rwx.git
+git clone --branch v0.2.2 https://github.com/mrhein/hcloud-csi-rwx.git
 cd hcloud-csi-rwx
 kubectl apply -k k8s/base
 ```
@@ -216,7 +216,7 @@ spec:
 ```bash
 kubectl delete -k k8s/base
 # Or from remote:
-kubectl delete -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.2.1"
+kubectl delete -k "https://github.com/mrhein/hcloud-csi-rwx.git/k8s/base?ref=v0.2.2"
 ```
 
 ## Security

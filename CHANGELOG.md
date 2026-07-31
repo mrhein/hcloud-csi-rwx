@@ -5,6 +5,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-31
+
+### Fixed
+
+- The failover controller kept reconciling PVCs that were already being
+  deleted, racing `DeleteVolume`: it recreated the state ConfigMap the driver
+  had just removed, leaving one orphan per affected volume in the driver
+  namespace. Claims with a `deletionTimestamp` are now left to the driver.
+  Cosmetic in effect, but it accumulates.
+
+### Added
+
+- `examples/wordpress/` — the classic RWX workload (three WordPress replicas
+  sharing one webroot, MariaDB on RWO), hardened and benchmarked. Putting the
+  webroot on NFS costs about 5% throughput versus a local volume, because
+  OPcache keeps the bytecode in memory: ~9.5 NFS operations per page view.
+
 ## [0.2.1] - 2026-07-31
 
 ### Changed
@@ -103,7 +120,8 @@ Initial release.
 - Multi-arch container image (amd64 + arm64) on SUSE BCI, published to
   ghcr.io via GitHub Actions.
 
-[Unreleased]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/mrhein/hcloud-csi-rwx/compare/v0.1.1...v0.1.2
